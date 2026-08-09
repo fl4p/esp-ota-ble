@@ -197,6 +197,7 @@ static void test_oversized() {
     std::string cmd = "begin " + std::to_string(g_fake.partSize + 1) + " " + sha256hex(makeImage(4));
     CHECK(otaBleSubmitCommand(cmd.c_str()) == OtaBleSubmit::Rejected,
           "oversized image was not rejected synchronously");
+    CHECK(sawLine("OTAB FAIL size"), "oversized rejection was not announced");
     CHECK(g_fake.beginCalls == 0, "esp_ota_begin called for an oversized image");
     CHECK(g_fake.eraseBytesInBegin == 0 && g_fake.eraseCallsInWrite == 0, "erased for an oversized image");
     otaBleTick(0);
@@ -217,8 +218,13 @@ static void test_malformed_commands() {
         "beginning 100 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", // prefix
     };
     for (const char *b : bad) {
+        g_status.clear();
         CHECK(otaBleSubmitCommand(b) == OtaBleSubmit::Rejected, "accepted malformed command: '%s'", b);
+        // Announced, not just returned: the caller's error path may only reach a console, and a host
+        // that hears nothing waits out its READY timeout instead of learning it sent garbage.
+        CHECK(sawLine("OTAB FAIL"), "rejection of '%s' was not announced on the status channel", b);
     }
+    g_status.clear();
     CHECK(otaBleSubmitCommand(nullptr) == OtaBleSubmit::Rejected, "accepted a null command");
     CHECK(g_fake.beginCalls == 0, "a malformed command reached esp_ota_begin");
     otaBleTick(0);
@@ -314,6 +320,7 @@ static void test_latch_collision() {
     CHECK(otaBleSubmitCommand(beginCmd(img).c_str()) == OtaBleSubmit::Accepted, "first rejected");
     CHECK(otaBleSubmitCommand("abort") == OtaBleSubmit::Rejected,
           "a second command was accepted while one was still latched");
+    CHECK(sawLine("OTAB FAIL busy"), "latch collision was not announced");
     otaBleTick(0);
     CHECK(otaBleActive(), "the first command did not execute");
     pushAll(img);
@@ -383,6 +390,7 @@ static void test_no_partition() {
     auto img = makeImage(5000);
     CHECK(otaBleSubmitCommand(beginCmd(img).c_str()) == OtaBleSubmit::Rejected,
           "begin accepted with no OTA partition");
+    CHECK(sawLine("OTAB FAIL no-partition"), "no-partition rejection was not announced");
     CHECK(!otaBleBegin(img.size(), sha256hex(img).c_str()), "direct begin succeeded with no partition");
     CHECK(sawLine("OTAB FAIL no-partition"), "no no-partition FAIL");
     otaBleTick(0);

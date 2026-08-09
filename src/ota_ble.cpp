@@ -292,7 +292,15 @@ void otaBleAbort() {
 }
 
 OtaBleSubmit otaBleSubmitCommand(const char *line) {
-    if (!line) return OtaBleSubmit::Rejected;
+    // Rejections are announced on the status channel as well as returned. The caller's own error
+    // path may only reach a console, and a host that sent a malformed command would otherwise learn
+    // nothing and sit out its READY timeout -- indistinguishable from a dead link.
+    auto reject = [](const char *why) {
+        emit(OtaBleLevel::Warn, "OTAB FAIL %s", why);
+        return OtaBleSubmit::Rejected;
+    };
+
+    if (!line) return reject("bad-command");
     while (*line == ' ') ++line;
 
     PendingCmd cmd;
@@ -303,13 +311,18 @@ OtaBleSubmit otaBleSubmitCommand(const char *line) {
         const char *p = line + 5;
         char shaHex[80];
         unsigned long parsedSize = 0;
-        if (sscanf(p, " %lu %79s", &parsedSize, shaHex) != 2) return OtaBleSubmit::Rejected;
-        if (parsedSize == 0 || parsedSize > UINT32_MAX) return OtaBleSubmit::Rejected;
-        if (strlen(shaHex) != 64 || parseHex32(shaHex, sha) != 0) return OtaBleSubmit::Rejected;
+        if (sscanf(p, " %lu %79s", &parsedSize, shaHex) != 2) return reject("bad-command");
+        if (parsedSize == 0 || parsedSize > UINT32_MAX) return reject("bad-size");
+        if (strlen(shaHex) != 64 || parseHex32(shaHex, sha) != 0) return reject("bad-sha");
         // Reject an oversized image before anything is latched, so the host learns synchronously
         // rather than via an async failure after the consumer has already quiesced sampling.
         const esp_partition_t *next = esp_ota_get_next_update_partition(nullptr);
-        if (!next || parsedSize > next->size) return OtaBleSubmit::Rejected;
+        if (!next) return reject("no-partition");
+        if (parsedSize > next->size) {
+            emit(OtaBleLevel::Warn, "OTAB FAIL size %u > part %u",
+                 (unsigned) parsedSize, (unsigned) next->size);
+            return OtaBleSubmit::Rejected;
+        }
         size = (uint32_t) parsedSize;
         cmd = PendingCmd::Begin;
     } else if (strncmp(line, "end", 3) == 0 && (line[3] == ' ' || line[3] == '\0' ||
@@ -319,11 +332,11 @@ OtaBleSubmit otaBleSubmitCommand(const char *line) {
                                                   line[5] == '\r' || line[5] == '\n')) {
         cmd = PendingCmd::Abort;
     } else {
-        return OtaBleSubmit::Rejected;
+        return reject("bad-command");
     }
 
     std::lock_guard<std::mutex> lk(cmdMutex);
-    if (pending != PendingCmd::None) return OtaBleSubmit::Rejected;
+    if (pending != PendingCmd::None) return reject("busy");
     pending = cmd;
     pendSize = size;
     if (cmd == PendingCmd::Begin) memcpy(pendSha, sha, 32);
