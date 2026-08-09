@@ -113,7 +113,21 @@ Only `OTA_WITH_SEQUENTIAL_WRITES` defers erasing to per-sector calls inside `esp
 
 If the bootloader has `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, the freshly flashed image boots as
 `PENDING_VERIFY` and **must** call `esp_ota_mark_app_valid_cancel_rollback()` once it has proven
-itself, or the next reset reverts it. Confirm on evidence that the application actually works — an
+itself, or the next reset reverts it.
+
+> **Arduino consumers: the core cancels rollback for you, before `setup()` runs.**
+> `initArduino()` (esp32-hal-misc.c) calls `esp_ota_mark_app_valid_cancel_rollback()` gated on a weak
+> `verifyRollbackLater()` that returns `false` — so an image is confirmed on nothing but having
+> reached init, and any health check you write afterwards is dead code that never sees
+> `PENDING_VERIFY`. Override it:
+>
+> ```cpp
+> extern "C" bool verifyRollbackLater() { return true; }
+> ```
+>
+> This was found on hardware, where a fresh OTA reached `VALID` at 43 s against a 60 s confirm gate
+> that had never run. If a fresh OTA reaches `VALID` sooner than your gate, you have lost the
+> override. Confirm on evidence that the application actually works — an
 uptime threshold plus a liveness signal from the real work — not merely that `setup()` returned. Pair
 it with a watchdog covering early boot: an image that hangs before the confirm point never resets, so
 the bootloader never gets its chance to roll back, and the device is bricked until someone reflashes
