@@ -1,0 +1,14 @@
+{
+  "name": "esp-ota-ble",
+  "version": "0.1.0",
+  "description": "OTA firmware update over BLE for ESP32: transport-agnostic receiver (staging ring, credit-window flow control, streaming SHA-256) driven by whatever GATT layer the consumer already has.",
+  "keywords": "ota, ble, esp32, firmware-update, nimble",
+  "license": "MIT",
+  "frameworks": ["arduino", "espidf"],
+  "platforms": ["espressif32"],
+  "headers": "ota_ble.h",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}
