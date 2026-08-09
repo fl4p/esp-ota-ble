@@ -82,12 +82,25 @@ Three rules the design depends on:
 ### PlatformIO
 
 ```ini
-lib_deps = symlink:///path/to/esp-ota-ble
+lib_deps = https://github.com/fl4p/esp-ota-ble.git
+```
+
+Or, to develop the module alongside its consumer — a git dependency pins a fetched copy and ignores
+local edits, which is the wrong shape while the module is still changing:
+
+```ini
+lib_deps = symlink://../esp-ota-ble     ; relative to the project dir; clone it beside your repo
 ```
 
 ### ESP-IDF
 
-Add the directory to `EXTRA_COMPONENT_DIRS`; `CMakeLists.txt` registers it as a component.
+```cmake
+list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../esp-ota-ble")
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+```
+
+`CMakeLists.txt` registers it as a component. Prefer failing loudly if the directory is absent — a
+missing OTA receiver should stop the build, not silently produce firmware that cannot be updated.
 
 ## Partitioning
 
