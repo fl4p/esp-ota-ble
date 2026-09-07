@@ -44,6 +44,10 @@ _RE_PROG = re.compile(r"OTAB PROG (\d+)/(\d+)")
 
 _MACOS = platform.system() == "Darwin"
 
+# Cap on un-terminated status bytes held per link. Status lines are tens of
+# bytes; anything approaching this is a peer that will never send a newline.
+_RX_MAX = 64 * 1024
+
 # The largest firmware write this module will issue on BlueZ, whatever the MTU
 # says. See usable_chunk() for why this number exists and how it was arrived at.
 BLUEZ_MAX_FW_WRITE = 400
@@ -53,7 +57,7 @@ class OtaBleError(Exception):
     pass
 
 
-def usable_chunk(mtu, backend_is_bluez=None):
+def usable_chunk(mtu, backend_is_bluez=None, max_write=0):
     """Bytes of firmware to put in one write-without-response.
 
     The obvious answer, `mtu - 3`, is correct on CoreBluetooth and WRONG on
@@ -89,12 +93,29 @@ def usable_chunk(mtu, backend_is_bluez=None):
     and have never corrupted an image. Acquiring the MTU to go faster is what
     introduced the failure.
     """
+    # PREFER THE TRANSPORT'S OWN ANSWER. `max_write` is the characteristic's
+    # max_write_without_response_size, which every backend computes from the
+    # negotiated ATT MTU it actually has - unlike an OS test, which cannot see
+    # through an adapted transport at all (fugu tunnels GATT through an ESPHome
+    # proxy: the data plane is an ESP32, whatever OS the script runs on).
+    if max_write:
+        chunk = int(max_write)
+    else:
+        chunk = max(int(mtu) - 3, 20)
+
+    # The policy cap. 400 is an EMPIRICAL regression point from one
+    # Pi/BlueZ/NimBLE combination, not a derived safety bound - see the
+    # measurements above. The derived bound is smaller: an ATT value of 244
+    # (251 LL payload - 4 L2CAP - 3 ATT) is the largest that fits one
+    # maximum-length link-layer PDU and so needs no L2CAP fragmentation. We cap
+    # at the empirical 400 rather than the theoretical 244 because 400 is what
+    # actually carried a 706 kB image end to end; 244 is the value to fall back
+    # to if a new controller misbehaves.
     if backend_is_bluez is None:
         backend_is_bluez = not _MACOS
-    chunk = max(int(mtu) - 3, 20)
     if backend_is_bluez:
         chunk = min(chunk, BLUEZ_MAX_FW_WRITE)
-    return chunk
+    return max(chunk, 20)
 
 
 async def find_device(name_prefix=None, address=None, service_uuid=None,
@@ -155,6 +176,10 @@ class BleOtaLink:
         # Status is a byte stream, not one line per notification: the device
         # drains its queue at MTU-3 a packet and a line can straddle two.
         self._rx += bytes(payload)
+        # BOUNDED. A peer that never sends a newline would otherwise grow this
+        # without limit; a status line from this receiver is tens of bytes.
+        if len(self._rx) > _RX_MAX:
+            self._rx = self._rx[-_RX_MAX:]
         while b"\n" in self._rx:
             line, self._rx = self._rx.split(b"\n", 1)
             text = line.decode("utf-8", "replace").strip()
@@ -192,7 +217,25 @@ class BleOtaLink:
 
     @property
     def chunk(self):
-        return self._chunk_override or usable_chunk(self.mtu)
+        if self._chunk_override:
+            return self._chunk_override
+        return usable_chunk(self.mtu, max_write=self._max_write())
+
+    def _max_write(self):
+        """The characteristic's own maximum write-without-response size.
+
+        This is the authoritative number and the OS is not: bleak documents
+        BlueZ's `mtu_size` as always 23 until the MTU is acquired, so deriving
+        the chunk from it silently yields 20 bytes. That is not a safety
+        margin, it is a 25x throughput loss dressed as one - the measured
+        1.4 kB/s on this path was 20-byte writes, not the 400 the cap implies.
+        """
+        try:
+            ch = self._cli.services.get_characteristic(self.fw_uuid)
+            n = getattr(ch, "max_write_without_response_size", None)
+            return int(n) if n else 0
+        except Exception:
+            return 0
 
     async def write_cmd(self, text):
         if isinstance(text, str):
@@ -239,6 +282,10 @@ class adapt_link(object):
 
     def _feed(self, payload):
         self._rx += bytes(payload)
+        # BOUNDED. A peer that never sends a newline would otherwise grow this
+        # without limit; a status line from this receiver is tens of bytes.
+        if len(self._rx) > _RX_MAX:
+            self._rx = self._rx[-_RX_MAX:]
         while b"\n" in self._rx:
             line, self._rx = self._rx.split(b"\n", 1)
             text = line.decode("utf-8", "replace").strip()
@@ -275,7 +322,11 @@ async def push_image(link, data, *, sha=None, cmd_prefix="", on_line=None,
                      on_progress=None,
                      ready_timeout=60.0, credit_timeout=20.0,
                      credit_retries=3, flush_timeout=60.0, pace_s=0.0):
-    """Run `begin`/stream/`end` against an already-open link. True on success.
+    """Run `begin`/stream/`end` against an already-open link.
+
+    Returns True if the device accepted the image, WHICH IS NOT THE SAME as the
+    new image running - see the note at the `end` write. Every caller needs its
+    own out-of-band confirmation.
 
     The device grants credit and the host must never write past it; that is the
     receiver's only flow control and its staging ring is what it protects.
@@ -298,9 +349,13 @@ async def push_image(link, data, *, sha=None, cmd_prefix="", on_line=None,
             state["granted"] = int(m.group(1))
             credit.set()
         m = _RE_PROG.search(line)
-        if m and int(m.group(1)) >= total:
-            state["full"] = True
-            full.set()
+        if m:
+            # BOTH fields, exactly. Accepting any numerator >= total and
+            # ignoring the denominator made a synthetic "OTAB PROG 9/999" on an
+            # 8-byte transfer count as a complete flush and send `end`.
+            if int(m.group(1)) == total and int(m.group(2)) == total:
+                state["full"] = True
+                full.set()
         if "OTAB OK" in line:
             state["ok"] = True
             done.set()
@@ -354,15 +409,45 @@ async def push_image(link, data, *, sha=None, cmd_prefix="", on_line=None,
     # write-without-response packets can still be in flight and the device
     # would see a short image and reject it.
     if not state["full"]:
-        try:
-            await asyncio.wait_for(full.wait(), timeout=flush_timeout)
-        except asyncio.TimeoutError:
+        # Wait on the failure paths too. Waiting only on `full` meant an
+        # OTAB FAIL that had already arrived, or a link that had already
+        # dropped, still cost the caller the whole timeout and then reported
+        # the generic "never reported the full image flushed" instead of the
+        # receiver's actual error.
+        waits = [asyncio.create_task(full.wait()),
+                 asyncio.create_task(done.wait()),
+                 asyncio.create_task(link.disconnected.wait())]
+        await asyncio.wait(waits, timeout=flush_timeout,
+                           return_when=asyncio.FIRST_COMPLETED)
+        for t in waits:
+            t.cancel()
+        if state["fail"]:
+            raise OtaBleError(state["fail"])
+        if link.disconnected.is_set():
+            raise OtaBleError("link dropped before the image was flushed")
+        if not state["full"]:
             raise OtaBleError("device never reported the full image flushed")
 
     await link.write_cmd("%send" % cmd_prefix)
-    # On success the device reboots immediately after queuing OTAB OK, so the
-    # notification usually never drains: a dropped link here is success, and
-    # only an explicit OTAB FAIL is failure.
+    # A DROPPED LINK HERE IS TREATED AS SUCCESS, AND THAT IS A GUESS. On a real
+    # success the device reboots immediately after queuing OTAB OK, so the
+    # notification usually never drains and there is nothing else to wait for.
+    #
+    # But `PROG total/total` only proves the flash WRITES finished. The digest
+    # check, the length check and esp_ota_set_boot_partition() all happen later,
+    # inside otaBleEnd(). So a target that loses power, watchdog-resets, or
+    # loses receiver state after the `end` write is acknowledged but before the
+    # consumer tick executes it produces exactly this signature - and this
+    # returns True while no boot slot was ever selected.
+    #
+    # The converse is possible too: if the receiver latches `end` but its ATT
+    # response is lost, write_cmd() above raises on a transfer that then
+    # completes.
+    #
+    # THE CALLER MUST NOT TREAT True AS PROOF THE NEW IMAGE IS RUNNING. Confirm
+    # out of band: the farm node reads its running OTA slot over LoRaWAN and
+    # requires it to have CHANGED; fugu and smart-shunt require the device to
+    # advertise again, which is weaker but is at least evidence it rebooted.
     waits = [asyncio.create_task(done.wait()),
              asyncio.create_task(link.disconnected.wait())]
     await asyncio.wait(waits, timeout=35, return_when=asyncio.FIRST_COMPLETED)
