@@ -159,3 +159,59 @@ false. The suite is calibrated — swapping in `OTA_SIZE_UNKNOWN`, or removing t
 guards, makes it fail.
 
 Run it before flashing any consumer.
+
+## Host side: `host/esp_ota_ble.py`
+
+The device half of this repo had three separate host tools speaking to it
+(`fugu-mppt-firmware/etc/ota_ble.py`, `pwr-metering/smart-shunt-ota-ble.py`,
+`ha/farming/tech/node-prototype/tools/ota_ble_push.py`) — about 1500 lines
+between them, all reimplementing the same discovery, link setup and OTAB
+protocol. `host/esp_ota_ble.py` is that, once. It needs only `bleak`.
+
+```python
+import esp_ota_ble as O
+
+link = O.BleOtaLink(CTRL_UUID, CTRL_UUID, DATA_UUID)   # one char: write + notify
+dev  = await O.find_device(name_prefix="farmnode-", service_uuid=SVC_UUID)
+await link.open(dev)
+ok = await O.push_image(link, image_bytes,
+                        on_line=print,
+                        on_progress=lambda s, t: bar(s, t))
+```
+
+A console-hosted receiver (NUS, `ota-ble begin ...`) passes
+`cmd_prefix="ota-ble "` to `push_image` and points `cmd_uuid`/`notify_uuid` at
+its RX/TX characteristics. A transport this module does not know about — fugu
+tunnels GATT through an ESPHome `bluetooth_proxy` — is wrapped with
+`O.adapt_link(link)`.
+
+### The reason it exists: `usable_chunk()`
+
+**`mtu - 3` is the right firmware-write size on CoreBluetooth and a silent
+image-corrupter on BlueZ.** All three tools computed it that way, and all three
+had only ever been run from macOS.
+
+Measured 2026-09-07, Raspberry Pi (BlueZ 5.82) to an ESP32-S3, ATT MTU
+negotiated at 517 and reported as 517 by both ends:
+
+| chunk | result |
+|---|---|
+| 514 (`mtu - 3`) | the 8192-byte credit window went out as 16 packets and the device received **one** |
+| 482 | arrived — it was that one survivor |
+| 400 | a full 706 640-byte image transferred and the device confirmed the new slot |
+
+The survivor was identifiable: it landed at offset 7710 length 482, and
+`image[7710:7714] == b"erat"`. `esp_ota_write` then rejected the image on its
+magic byte, because the first byte it ever saw was the middle of a string
+table.
+
+A write-without-response is unacknowledged by definition, so **nothing upstream
+notices**: bleak awaits BlueZ's D-Bus reply and BlueZ accepted all sixteen.
+`usable_chunk()` caps the write at 400 bytes on non-Darwin hosts for this
+reason.
+
+Do not "fix" this by calling bleak's `_acquire_mtu()` and trusting the result.
+On BlueZ, bleak reports the 23-byte default until the MTU is acquired — which
+is exactly why the two older tools chunked at 20 bytes there and never
+corrupted an image. Acquiring the MTU to go faster is what introduced the
+failure.
