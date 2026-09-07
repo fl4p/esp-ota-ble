@@ -187,31 +187,70 @@ tunnels GATT through an ESPHome `bluetooth_proxy` — is wrapped with
 
 ### The reason it exists: `usable_chunk()`
 
-**`mtu - 3` is the right firmware-write size on CoreBluetooth and a silent
-image-corrupter on BlueZ.** All three tools computed it that way, and all three
-had only ever been run from macOS.
+**Sizing a firmware write is the one thing every copy of this code got wrong**,
+and it fails silently in both directions. A `write-without-response` is
+unacknowledged *by definition*, so nothing upstream ever reports a bad choice.
+
+Ask the characteristic for **`max_write_without_response_size`**. That is what
+`usable_chunk()` uses when the transport can supply it.
+
+#### Too large: the image is corrupted and nobody says so
 
 Measured 2026-09-07, Raspberry Pi (BlueZ 5.82) to an ESP32-S3, ATT MTU
-negotiated at 517 and reported as 517 by both ends:
+negotiated at 517 and reported as 517 by both ends, writing `mtu - 3` = 514:
 
 | chunk | result |
 |---|---|
 | 514 (`mtu - 3`) | the 8192-byte credit window went out as 16 packets and the device received **one** |
-| 482 | arrived — it was that one survivor |
 | 400 | a full 706 640-byte image transferred and the device confirmed the new slot |
 
-The survivor was identifiable: it landed at offset 7710 length 482, and
-`image[7710:7714] == b"erat"`. `esp_ota_write` then rejected the image on its
-magic byte, because the first byte it ever saw was the middle of a string
-table.
+The survivor was identifiable rather than lucky: it landed at offset 7710,
+length 482, and `image[7710:7714] == b"erat"`. `esp_ota_write` then rejected the
+image on its **magic byte**, because the first byte it ever saw was the middle
+of a string table — an error that points nowhere near the cause.
 
-A write-without-response is unacknowledged by definition, so **nothing upstream
-notices**: bleak awaits BlueZ's D-Bus reply and BlueZ accepted all sixteen.
-`usable_chunk()` caps the write at 400 bytes on non-Darwin hosts for this
-reason.
+Nothing upstream noticed. bleak awaited BlueZ's D-Bus reply and BlueZ accepted
+all sixteen writes. **This is why the protocol carries a streaming SHA-256 and a
+length check**: over write-without-response the transport cannot be trusted to
+report loss, so the receiver has to catch it.
 
-Do not "fix" this by calling bleak's `_acquire_mtu()` and trusting the result.
-On BlueZ, bleak reports the 23-byte default until the MTU is acquired — which
-is exactly why the two older tools chunked at 20 bytes there and never
-corrupted an image. Acquiring the MTU to go faster is what introduced the
-failure.
+#### Too small: a 25x throughput loss that looks like a slow link
+
+Do not "fix" the above by acquiring the MTU and trusting `mtu - 3` — and do not
+derive the chunk from `mtu_size` either. bleak reports BlueZ's **23-byte
+default** until the MTU is acquired, so `max(mtu - 3, 20)` silently yields
+20-byte writes. Measured: **1.4 kB/s** for a 680 kB image, where the same image
+over CoreBluetooth takes one to two minutes.
+
+#### An OS test is not a backend test
+
+`platform.system() != "Darwin"` misclassifies WinRT and any custom backend, and
+it is blind to an adapted transport: fugu tunnels GATT through an ESPHome
+`bluetooth_proxy`, whose data plane is an ESP32 whatever OS runs the script.
+`usable_chunk()` falls back to the OS test only when the characteristic cannot
+answer.
+
+#### Know which constant you are using
+
+- **244 bytes** is *derived*: 251-byte maximum LL payload − 4 L2CAP − 3 ATT, the
+  largest ATT value fitting one maximum-length link-layer PDU, so no L2CAP
+  fragmentation. The negotiated Data Length may be smaller, so this is not
+  universally safe either.
+- **400 bytes** (`BLUEZ_MAX_FW_WRITE`) is *empirical*: one Pi/BlueZ/NimBLE
+  combination, one successful image. It says nothing about other controllers or
+  a proxied transport. It is a regression point, not a safety bound.
+
+#### `push_image()` returning True is not proof the new image runs
+
+A link drop after `end` is treated as success, because on a real success the
+device reboots before the notification drains. But `PROG total/total` only
+proves the flash *writes* finished — the digest check, the length check and
+`esp_ota_set_boot_partition()` all happen later, inside `otaBleEnd()`. A target
+that dies between the acknowledged `end` write and the consumer tick returns
+`True` with no boot slot selected.
+
+**Confirm out of band.** The strongest check is to read the device's running OTA
+slot afterwards and require it to have *changed*; requiring the device to
+advertise again is weaker but at least shows it rebooted. An uptime comparison
+is not a check at all: a rejected image reboots immediately and the *previous*
+image comes up with uptime zero, satisfying it.
