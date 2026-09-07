@@ -50,14 +50,17 @@ OtaBleSubmit otaBleSubmitCommand(const char *line);
 /// Copy firmware bytes into the staging ring. Producer task; never touches flash.
 void otaBleStageBytes(const uint8_t *data, size_t len);
 
-/// Consumer task: execute a latched command, then drain the ring to flash.
+/// Consumer task: execute a latched command, drain the ring to flash, re-announce credit, and abort
+/// a transfer that accepts no bytes for 30 seconds. nowMs must be a wrapping monotonic millisecond
+/// counter (for example millis()).
 void otaBleTick(uint32_t nowMs);
 
 /// True between a successful begin and the matching end/abort.
 bool otaBleActive();
 
-/// Ask the consumer task to abort. Safe from any task, and a no-op when nothing is in flight --
-/// consumers wire this to BLE disconnect, which also fires for clients that never started an OTA.
+/// Ask the consumer task to abort. Safe from any task; also cancels a latched begin that has not run
+/// yet, and is a no-op when neither a transfer nor a begin is in flight. Consumers should call this
+/// unconditionally on BLE disconnect, which also fires for clients that never started an OTA.
 void otaBleRequestAbort();
 
 // Direct entry points. otaBleSubmitCommand() is the normal way in; these are exposed for a consumer

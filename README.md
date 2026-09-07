@@ -29,11 +29,20 @@ device → host : OTAB READY part=<label> size=<n>
 ```
 
 Firmware bytes go on a separate write-without-response channel, chunked at the negotiated ATT MTU
-minus 3, and the host must never stream past the most recent `CRED` offset.
+minus 3, and the host must never stream past the most recent `CRED` offset. Violating that window
+aborts immediately with `OTAB FAIL credit-overrun`; the producer callback only latches the failure,
+and the consumer tick reports and tears it down without doing flash work on the BLE host task.
 
 There is **no per-chunk ack**. Flow control is a single cumulative high-water mark
 (`bytes flushed + 8 KB`), and integrity is the final length check plus SHA-256. A dropped byte costs
-a full retry and nothing less — that trade is what makes the transfer fast enough to be usable.
+a full retry and nothing less — that trade is what makes the transfer fast enough to be usable. The
+receiver re-announces the current `CRED` every 5 seconds while active, so a lost credit notification
+does not deadlock the stream.
+
+An active transfer that accepts no firmware bytes for 30 seconds aborts with `OTAB FAIL stalled`.
+This bounds both an open OTA handle and the consumer's quiesced state if a disconnect callback is
+missed. `otaBleRequestAbort()` is still the prompt disconnect path: called while `begin` is latched,
+it cancels that begin before it can quiesce the device. It is harmless when no OTA is in flight.
 
 Sequence: `begin` → wait for `READY` → stream up to each `CRED` → **wait for `PROG <size>/<size>`**
 → `end`. Waiting for the final `PROG` matters: write-without-response packets can still be in flight,
@@ -62,7 +71,7 @@ otaBleStageBytes(data, len);
 // A slow periodic loop on an ordinary task:
 otaBleTick(millis());
 
-// BLE disconnect:
+// BLE disconnect (unconditional -- this also cancels a begin waiting for the consumer tick):
 otaBleRequestAbort();
 ```
 

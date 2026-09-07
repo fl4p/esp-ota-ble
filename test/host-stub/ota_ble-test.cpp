@@ -52,6 +52,13 @@ static const Status *findLine(const char *needle) {
     return nullptr;
 }
 
+static size_t countLines(const char *needle) {
+    size_t n = 0;
+    for (auto &s : g_status)
+        if (s.line.find(needle) != std::string::npos) ++n;
+    return n;
+}
+
 static void begin_case(const char *name) {
     g_case = name;
     fakeOtaReset();
@@ -238,12 +245,16 @@ static void test_credit_overrun() {
     otaBleSubmitCommand(beginCmd(img).c_str());
     otaBleTick(0);
     // Stream far past the credit window without ever letting the consumer drain.
-    for (size_t sent = 0; sent < img.size(); sent += 1024)
+    for (size_t sent = 0; sent < 9 * 1024; sent += 1024)
         otaBleStageBytes(img.data() + sent, 1024);
+    CHECK(!sawLine("OTAB FAIL credit-overrun"), "producer reported an overrun synchronously");
+    CHECK(g_fake.writeCalls == 0, "producer touched flash while latching an overrun");
+    int writesBefore = g_fake.writeCalls;
     otaBleTick(0);
-    otaBleSubmitCommand("end");
-    otaBleTick(0);
-    CHECK(sawLine("OTAB FAIL"), "overrun did not fail");
+    CHECK(sawLine("OTAB FAIL credit-overrun"), "overrun was not reported by name");
+    CHECK(!otaBleActive(), "overrun remained active after the consumer observed it");
+    CHECK(g_fake.writeCalls == writesBefore, "consumer flushed bytes after an overrun was latched");
+    CHECK(g_fake.aborted, "esp_ota_abort not called after a credit overrun");
     CHECK(g_fake.bootPart == nullptr, "boot partition MOVED after a credit overrun");
     end_case();
 }
@@ -293,6 +304,38 @@ static void test_stale_abort_latch() {
     otaBleTick(0);
     CHECK(g_fake.bootPart != nullptr, "transfer aborted by a stale abort latch");
     CHECK(!sawLine("OTAB FAIL aborted"), "stale abort fired");
+    end_case();
+}
+
+static void test_abort_latched_begin() {
+    // Exact disconnect race: Begin is published by the host task, but the consumer has not run it
+    // yet. The abort belongs to that pending session, not to some future transfer.
+    begin_case("abort a latched begin before the tick");
+    auto img = makeImage(20000);
+    CHECK(otaBleSubmitCommand(beginCmd(img).c_str()) == OtaBleSubmit::Accepted, "begin rejected");
+    CHECK(!otaBleActive(), "latched begin reported active before it executed");
+    otaBleRequestAbort();
+    otaBleTick(1);
+    CHECK(!otaBleActive(), "latched begin became active after its disconnect abort");
+    CHECK(g_fake.beginCalls == 0, "esp_ota_begin ran after the pending begin was cancelled");
+    CHECK(g_quiesce.empty(), "quiesce ran for a begin cancelled before execution");
+    if (otaBleActive()) otaBleAbort(); // keep later cases independent if this regression returns
+    end_case();
+}
+
+static void test_stall_timeout() {
+    begin_case("no-byte stall timeout");
+    auto img = makeImage(20000);
+    otaBleSubmitCommand(beginCmd(img).c_str());
+    otaBleTick(100);
+    CHECK(otaBleActive(), "begin did not arm");
+    otaBleTick(30099);
+    CHECK(otaBleActive(), "stall timeout fired early");
+    otaBleTick(30100);
+    CHECK(!otaBleActive(), "stalled transfer stayed active");
+    CHECK(sawLine("OTAB FAIL stalled"), "stall timeout did not report its cause");
+    CHECK(g_fake.aborted, "esp_ota_abort not called for a stalled transfer");
+    CHECK(g_quiesce.size() >= 2 && !g_quiesce.back(), "sampling not released after a stall");
     end_case();
 }
 
@@ -428,6 +471,23 @@ static void test_progress_and_credit() {
     end_case();
 }
 
+static void test_credit_repeat() {
+    begin_case("credit re-announcement");
+    auto img = makeImage(20000);
+    otaBleSubmitCommand(beginCmd(img).c_str());
+    otaBleTick(100);
+    otaBleStageBytes(img.data(), 4096);
+    otaBleTick(200);
+    CHECK(countLines("OTAB CRED 12288") == 1, "drained credit was not announced exactly once");
+    otaBleTick(5199);
+    CHECK(countLines("OTAB CRED 12288") == 1, "credit repeated before five seconds");
+    otaBleTick(5200);
+    CHECK(countLines("OTAB CRED 12288") == 2, "drained credit was not re-announced after five seconds");
+    otaBleSubmitCommand("abort");
+    otaBleTick(5201);
+    end_case();
+}
+
 int main() {
     printf("ota_ble host tests\n");
     test_happy_path();
@@ -439,6 +499,8 @@ int main() {
     test_credit_overrun();
     test_abort_mid_transfer();
     test_stale_abort_latch();
+    test_abort_latched_begin();
+    test_stall_timeout();
     test_begin_while_active();
     test_latch_collision();
     test_end_without_session();
@@ -448,6 +510,7 @@ int main() {
     test_no_partition();
     test_ring_wrap();
     test_progress_and_credit();
+    test_credit_repeat();
 
     if (g_failures) {
         printf("\n%d check(s) FAILED\n", g_failures);

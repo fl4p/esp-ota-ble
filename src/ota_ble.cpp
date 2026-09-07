@@ -20,10 +20,16 @@
 static constexpr size_t RING_CAP = 8 * 1024;
 static constexpr size_t FLUSH_SLICE = 2048;       // flash-page-friendly esp_ota_write granularity
 static constexpr size_t CRED_STEP = RING_CAP / 2; // re-grant credit in half-window steps (limits notifies)
+// Four chances inside the host tools' 20 s credit wait, at only 12 idle notifications per minute.
+static constexpr uint32_t CRED_REPEAT_MS = 5000;
+// Matches the 30 s watchdog already used by the node consumer, now a backstop for every transport.
+static constexpr uint32_t STALL_MS = 30000;
 
 static uint8_t *ring = nullptr;
 static size_t rHead = 0, rTail = 0, rCount = 0;   // byte ring indices + fill level
-static std::mutex ringMutex;                      // guards ring + rCount across producer / consumer
+// Also serialises active/failed with freeRing(): the producer's locked recheck must finish before
+// the consumer can make the storage unreachable.
+static std::mutex ringMutex;
 
 static esp_ota_handle_t otaHandle = 0;
 static const esp_partition_t *otaPart = nullptr;
@@ -35,8 +41,14 @@ static bool failed = false;
 static volatile bool abortReq = false; // set from any task; consumed by the consumer tick
 static uint32_t expectedSize = 0;
 static uint32_t written = 0;    // flushed to flash (consumer)
+static uint32_t staged = 0;     // accepted from the producer; sampled by the stall watchdog
 static uint32_t lastGranted = 0;
 static uint32_t lastProg = 0;
+static uint32_t creditRepeatAt = 0;
+static bool creditRepeatArmed = false;
+static uint32_t stallMark = 0;
+static uint32_t stallAt = 0;
+static bool stallArmed = false;
 
 static OtaBleHooks hooks;
 
@@ -85,13 +97,25 @@ static void freeRing() {
 
 static void grantCredit() {
     // High-water mark: the host may stream up to (written + RING_CAP) cumulative bytes. Advance it as
-    // flash drains; re-announce only in CRED_STEP jumps to avoid notify spam.
+    // flash drains; announce advances only in CRED_STEP jumps, while repeatCredit recovers a lost one.
     uint32_t g = written + RING_CAP;
     if (g > expectedSize) g = expectedSize;
     if (g >= lastGranted + CRED_STEP || g == expectedSize) {
         lastGranted = g;
         emit(OtaBleLevel::Info, "OTAB CRED %u", (unsigned) g);
+        creditRepeatArmed = false;
     }
+}
+
+static void repeatCredit(uint32_t nowMs) {
+    if (!creditRepeatArmed) {
+        creditRepeatAt = nowMs;
+        creditRepeatArmed = true;
+        return;
+    }
+    if (nowMs - creditRepeatAt < CRED_REPEAT_MS) return;
+    creditRepeatAt = nowMs;
+    emit(OtaBleLevel::Info, "OTAB CRED %u", (unsigned) lastGranted);
 }
 
 void otaBleInit(const OtaBleHooks &h) { hooks = h; }
@@ -130,9 +154,11 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32]) {
     mbedtls_sha256_starts(&shaCtx, 0); // 0 = SHA-256
     rHead = rTail = rCount = 0;
     expectedSize = size;
-    written = lastGranted = lastProg = 0;
+    written = staged = lastGranted = lastProg = 0;
     failed = false;
     abortReq = false; // an abort aimed at a previous session must not poison this one
+    creditRepeatArmed = false;
+    stallArmed = false;
     active = true;
     emit(OtaBleLevel::Info, "OTAB READY part=%s size=%u", otaPart->label, (unsigned) size);
     grantCredit();
@@ -152,7 +178,7 @@ void otaBleStageBytes(const uint8_t *data, size_t len) {
     if (!len) return;
     std::lock_guard<std::mutex> lk(ringMutex);
     if (!active || failed || !ring) return; // re-check under lock: consumer teardown frees ring here too
-    if (len > RING_CAP - rCount) { // host overran its credit window -- fatal, caught later by sha/len
+    if (len > RING_CAP - rCount) { // host overran its credit window -- consumer reports + aborts
         failed = true;
         return;
     }
@@ -161,6 +187,42 @@ void otaBleStageBytes(const uint8_t *data, size_t len) {
     if (len > first) memcpy(ring, data + first, len - first);
     rHead = (rHead + len) % RING_CAP;
     rCount += len;
+    staged += len;
+}
+
+static bool abortIfOverrun() {
+    bool overrun;
+    {
+        std::lock_guard<std::mutex> lk(ringMutex);
+        overrun = active && failed;
+    }
+    if (!overrun) return false;
+    // Reporting from the producer would run the consumer's status transport while ringMutex is
+    // held on the BLE host task. Defer both the diagnosis and teardown to this consumer-side path.
+    emit(OtaBleLevel::Warn, "OTAB FAIL credit-overrun");
+    otaBleAbort();
+    return true;
+}
+
+static bool abortIfStalled(uint32_t nowMs) {
+    uint32_t stagedNow;
+    {
+        std::lock_guard<std::mutex> lk(ringMutex);
+        if (!active) return false;
+        stagedNow = staged;
+    }
+    if (!stallArmed || stagedNow != stallMark) {
+        stallMark = stagedNow;
+        stallAt = nowMs;
+        stallArmed = true;
+        return false;
+    }
+    if (nowMs - stallAt < STALL_MS) return false;
+    // A disappeared peer cannot finish an open handle. Bounding this state also bounds how long a
+    // consumer's quiesce hook can leave its sampler or power stage halted after a missed disconnect.
+    emit(OtaBleLevel::Warn, "OTAB FAIL stalled");
+    otaBleAbort();
+    return true;
 }
 
 /// Consumer only. Move everything staged to flash. Returns false if a write failed (session aborted).
@@ -183,7 +245,7 @@ static bool drainRing() {
         esp_err_t err = esp_ota_write(otaHandle, slice, n);
         if (err != ESP_OK) {
             emit(OtaBleLevel::Error, "OTAB FAIL esp_ota_write %s", esp_err_to_name(err));
-            failed = true;
+            { std::lock_guard<std::mutex> lk(ringMutex); failed = true; }
             otaBleAbort();
             return false;
         }
@@ -202,8 +264,6 @@ static bool drainRing() {
 }
 
 void otaBleTick(uint32_t nowMs) {
-    (void) nowMs;
-
     // Latched commands run here, never on the producer task: begin and end block on flash for far
     // longer than a BLE host callback may.
     PendingCmd cmd;
@@ -222,22 +282,34 @@ void otaBleTick(uint32_t nowMs) {
             case PendingCmd::Abort: otaBleAbort(); break;
             case PendingCmd::None:  break;
         }
-        // Cleared only after execution, so a command arriving mid-execution is rejected rather than
-        // queued behind one whose outcome the host has not seen yet.
-        std::lock_guard<std::mutex> lk(cmdMutex);
-        pending = PendingCmd::None;
+        bool cancelStartedBegin;
+        {
+            // Cleared only after execution, so a command arriving mid-execution is rejected rather
+            // than queued behind one whose outcome the host has not seen yet. A disconnect may,
+            // however, replace Begin with Abort while the slow begin is executing; honour it after
+            // begin returns rather than letting beginWithDigest's stale-abort reset erase it.
+            std::lock_guard<std::mutex> lk(cmdMutex);
+            cancelStartedBegin = cmd == PendingCmd::Begin && pending == PendingCmd::Abort;
+            pending = PendingCmd::None;
+        }
+        if (cancelStartedBegin && active) { otaBleAbort(); return; }
     }
 
     if (!active) return;
+    if (abortIfOverrun()) return;
     if (abortReq) { otaBleAbort(); return; } // disconnect/abort requested off the consumer task
-    drainRing();
+    if (abortIfStalled(nowMs)) return;
+    if (!drainRing()) return;
+    repeatCredit(nowMs);
 }
 
 bool otaBleEnd() {
     if (!active) { emit(OtaBleLevel::Warn, "OTAB FAIL not-active"); return false; }
+    if (abortIfOverrun()) return false;
     if (!drainRing()) return false; // drain whatever is still staged; false = aborted on a write error
+    if (abortIfOverrun()) return false;
 
-    if (failed || written != expectedSize) {
+    if (written != expectedSize) {
         emit(OtaBleLevel::Warn, "OTAB FAIL incomplete %u/%u", (unsigned) written, (unsigned) expectedSize);
         otaBleAbort();
         return false;
@@ -274,9 +346,18 @@ bool otaBleEnd() {
 }
 
 void otaBleRequestAbort() {
-    // Ignored when nothing is in flight. Consumers wire this to BLE disconnect, which also fires for
-    // clients that never started an OTA; latching the flag then would leave it set forever (nothing
-    // clears it while inactive) and kill the *next* transfer the moment it armed.
+    // A disconnect may land after Begin was published but before the consumer claims it. Replace
+    // that command in its own slot; if the consumer already copied it, the post-execution check in
+    // otaBleTick catches the replacement without holding cmdMutex across flash work.
+    {
+        std::lock_guard<std::mutex> lk(cmdMutex);
+        if (pending == PendingCmd::Begin) {
+            pending = PendingCmd::Abort;
+            return;
+        }
+    }
+    // Otherwise ignore an idle disconnect. Latching abortReq with no session to consume it would
+    // kill the next transfer the moment it armed.
     if (!active) return;
     abortReq = true;
 }
@@ -288,6 +369,8 @@ void otaBleAbort() {
     mbedtls_sha256_free(&shaCtx);
     quiesce(false);
     abortReq = false;
+    creditRepeatArmed = false;
+    stallArmed = false;
     emit(OtaBleLevel::Warn, "OTAB FAIL aborted");
 }
 
