@@ -14,6 +14,10 @@ struct FakeOta {
     size_t sectorSize = 4096;
     bool noPartition = false;       ///< esp_ota_get_next_update_partition() returns nullptr
     bool failBegin = false;
+    /// Fail the way IDF actually fails an erase: the handle is already assigned and the operation
+    /// registered, so only esp_ota_abort() releases it. `failBegin` fails earlier, before a handle
+    /// exists -- the two are different bugs and only this one leaks.
+    bool failBeginDuringErase = false;
     int failWriteAtCall = -1;       ///< 1-based esp_ota_write call number to fail, -1 = never
     bool failEnd = false;
     bool failSetBoot = false;
@@ -21,6 +25,7 @@ struct FakeOta {
 
     // --- observations ---
     int beginCalls = 0;
+    int liveOtaOps = 0;             ///< esp_ota_begin minus end/abort
     size_t eraseBytesInBegin = 0;   ///< bytes erased synchronously inside esp_ota_begin
     int eraseCallsInWrite = 0;      ///< number of incremental erases performed during writes
     size_t eraseBytesInWrite = 0;

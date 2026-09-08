@@ -14,12 +14,18 @@
 typedef void *esp_delta_ota_handle_t;
 
 typedef esp_err_t (*src_read_cb_t)(uint8_t *buf_p, size_t size, int src_offset);
+typedef esp_err_t (*src_read_cb_with_user_ctx_t)(uint8_t *buf_p, size_t size, int src_offset, void *user_data);
 typedef esp_err_t (*merged_stream_write_cb_t)(const uint8_t *buf_p, size_t size);
 typedef esp_err_t (*merged_stream_write_cb_with_user_ctx_t)(const uint8_t *buf_p, size_t size, void *user_data);
 
 typedef struct esp_delta_ota_cfg {
     void *user_data;
-    src_read_cb_t read_cb;
+    // A union, exactly as espressif/esp_delta_ota >=1.1.1 declares it: the library selects the
+    // with-user-data member for BOTH callbacks when user_data is non-null.
+    union {
+        src_read_cb_t read_cb;
+        src_read_cb_with_user_ctx_t read_cb_with_user_data;
+    };
     union {
         merged_stream_write_cb_with_user_ctx_t write_cb_with_user_data;
         merged_stream_write_cb_t write_cb;

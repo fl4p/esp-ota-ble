@@ -99,7 +99,13 @@ static esp_err_t deltaWriteCb(const uint8_t *buf, size_t size, void *user) {
     return xio.write(buf, size, xio.ctx);
 }
 
-static esp_err_t deltaReadCb(uint8_t *buf, size_t size, int srcOffset) {
+// FOUR arguments, and installed in read_cb_with_user_data. esp_delta_ota picks between the two
+// union members on `user_data` being non-null (esp_delta_ota.c:64) -- and it does that for the READ
+// callback as well as the write one. Installing the three-argument member while passing user_data
+// meant the library called this through a four-argument pointer type: it happens to work on Xtensa,
+// which ignores the extra argument, but it is undefined and would not survive LTO or another target.
+static esp_err_t deltaReadCb(uint8_t *buf, size_t size, int srcOffset, void *user) {
+    (void) user;
     if (srcOffset < 0) return ESP_ERR_INVALID_ARG;
     return xio.read(buf, size, (uint32_t) srcOffset, xio.ctx);
 }
@@ -142,7 +148,7 @@ bool otaXformBegin(OtaXform x, uint32_t outSize, const OtaXformIo &io, const cha
             deltaHdrRead = 0;
             esp_delta_ota_cfg_t cfg = {};
             cfg.user_data = &xio; // non-null selects the with-user-data write callback union member
-            cfg.read_cb = &deltaReadCb;
+            cfg.read_cb_with_user_data = &deltaReadCb;
             cfg.write_cb_with_user_data = &deltaWriteCb;
             deltaHandle = esp_delta_ota_init(&cfg);
             if (!deltaHandle) return fail("xform-init");
@@ -227,15 +233,33 @@ esp_err_t otaXformFinish() {
     switch (current) {
         case OtaXform::Raw:
             return ESP_OK;
-        case OtaXform::Tamp:
+        case OtaXform::Tamp: {
 #if OTA_XFORM_HAVE_TAMP
-            // Tamp emits everything it can as it goes; there is no tail to flush. A stream that
-            // ended mid-token simply produced too few bytes, which the caller's length check
-            // catches -- reporting it here as well would only duplicate that diagnosis.
+            // Drain what the decompressor is still holding. It can retain decoded output after
+            // consuming ALL of its input -- a match that ran past the end of the output slice is
+            // resumed on the next call (TampDecompressor::skip_bytes) -- so the feed loop, which
+            // stops when its input is consumed, cannot be the last word. Mid-stream that costs
+            // nothing because the next feed resumes it; on the FINAL feed the tail would simply be
+            // lost, and the image then comes up short after the slot has already been erased.
+            // Measured: 28 of 400 consecutive image sizes stranded a tail, e.g. 20205 bytes fed
+            // 512 at a time lost exactly one byte.
+            static uint8_t out[XFORM_OUT_SLICE];
+            for (;;) {
+                size_t got = 0;
+                const tamp_res res = tamp_decompressor_decompress(
+                        &tampDec, out, sizeof(out), &got, (const unsigned char *) "", 0, nullptr);
+                if (res != TAMP_OK && res != TAMP_INPUT_EXHAUSTED && res != TAMP_OUTPUT_FULL) {
+                    return ESP_ERR_INVALID_CRC;
+                }
+                if (!got) break; // nothing left to emit; more calls cannot make progress
+                const esp_err_t werr = xio.write(out, got, xio.ctx);
+                if (werr != ESP_OK) return werr;
+            }
             return ESP_OK;
 #else
             return ESP_ERR_NOT_SUPPORTED;
 #endif
+        }
         case OtaXform::Delta:
 #if OTA_XFORM_HAVE_DELTA
             // A patch that never delivered its full header never delivered a patch either.

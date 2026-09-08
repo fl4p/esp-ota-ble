@@ -8,4 +8,4 @@ dependencies:
   # at ~9 %. Neither is needed to build -- see the __has_include guards -- but an IDF consumer that
   # skipped them would only discover the gap as a runtime "xform-unsupported".
   brianpugh/tamp: "^1.6.0"
-  espressif/esp_delta_ota: "^1.1.0"
+  espressif/esp_delta_ota: "^1.1.4"   # >=1.1.1 for read_cb_with_user_data

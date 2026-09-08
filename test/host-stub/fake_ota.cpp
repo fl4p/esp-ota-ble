@@ -86,7 +86,16 @@ const esp_partition_t *esp_ota_get_next_update_partition(const esp_partition_t *
 
 esp_err_t esp_ota_begin(const esp_partition_t *partition, size_t image_size, esp_ota_handle_t *out) {
     ++g_fake.beginCalls;
+    // Before a handle exists, exactly like IDF's argument/state checks. Nothing to release.
     if (g_fake.failBegin) return ESP_FAIL;
+
+    // IDF registers the operation and publishes the handle BEFORE erasing (esp_ota_ops.c:181),
+    // then returns an erase error without unregistering it (:196-199). Model that order, or a
+    // test cannot tell a leaked operation from a clean refusal.
+    g_handleOpen = true;
+    ++g_fake.liveOtaOps;
+    *out = 1;
+    if (g_fake.failBeginDuringErase) return ESP_FAIL;
 
     g_needErase = (image_size == OTA_WITH_SEQUENTIAL_WRITES);
     if (!g_needErase) {
@@ -99,9 +108,7 @@ esp_err_t esp_ota_begin(const esp_partition_t *partition, size_t image_size, esp
         }
         g_fake.eraseBytesInBegin += eraseSize;
     }
-    g_handleOpen = true;
     g_wroteSize = 0;
-    *out = 1;
     return ESP_OK;
 }
 
@@ -127,12 +134,14 @@ esp_err_t esp_ota_write(esp_ota_handle_t, const void *data, size_t size) {
 
 esp_err_t esp_ota_end(esp_ota_handle_t) {
     g_handleOpen = false;
+    --g_fake.liveOtaOps;
     g_fake.ended = true;
     return g_fake.failEnd ? ESP_ERR_OTA_VALIDATE_FAILED : ESP_OK;
 }
 
 esp_err_t esp_ota_abort(esp_ota_handle_t) {
     g_handleOpen = false;
+    --g_fake.liveOtaOps;
     g_fake.aborted = true;
     return ESP_OK;
 }

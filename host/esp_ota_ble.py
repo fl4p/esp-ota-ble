@@ -479,7 +479,15 @@ def cached_image(iid, extra_dirs=()):
         return None
     path = os.path.join(image_cache_dir(), iid + ".bin")
     if os.path.exists(path):
-        return path
+        # Verify the CONTENT, not the filename. Anything can end up at a given pathname -- an
+        # interrupted write, a hand-copied file, a stale entry -- and a base that is not the image
+        # the device is running is exactly what produces a patch that cannot be applied.
+        try:
+            with open(path, "rb") as f:
+                if image_id(f.read()) == iid:
+                    return path
+        except OSError:
+            pass
     for d in extra_dirs:
         try:
             names = os.listdir(d)
@@ -504,8 +512,12 @@ def build_tamp_payload(data, window=TAMP_WINDOW_BITS):
     return tamp.compress(data, window=window)
 
 
-def build_delta_payload(base_path, data, *, verify=True):
+def build_delta_payload(base_path, data, *, verify=True, expect_base=None):
     """A device-ready delta: the 64-byte container plus a heatshrink patch.
+
+    `expect_base` is the image id the DEVICE reported. Pass it whenever you have
+    it: without it this trusts whatever is at `base_path`, and a base that is not
+    what the device is running is the whole failure mode.
 
     `verify` re-applies the patch to the base here on the host and checks it
     reproduces `data` byte for byte. It costs a second and it is not optional in
@@ -515,18 +527,28 @@ def build_delta_payload(base_path, data, *, verify=True):
     """
     import detools
 
+    # Read the base ONCE and work from those bytes throughout. Re-opening the path for patch
+    # creation and again for verification would let the file change underneath: the container would
+    # name the image we hashed while the patch was built against a different one, and host
+    # verification would happily confirm the wrong pairing.
     with open(base_path, "rb") as f:
         base = f.read()
     base_id = image_id(base)
     if not base_id:
         raise OtaBleError("base %s carries no appended SHA-256; it is not an app image" % base_path)
+    if expect_base and base_id != expect_base:
+        raise OtaBleError("base %s is %s, but the device is running %s"
+                          % (base_path, base_id[:12], expect_base[:12]))
 
     with tempfile.TemporaryDirectory() as td:
+        base_snap = os.path.join(td, "base.bin")
         new_path = os.path.join(td, "new.bin")
         patch_path = os.path.join(td, "patch.bin")
+        with open(base_snap, "wb") as f:
+            f.write(base)
         with open(new_path, "wb") as f:
             f.write(data)
-        with open(base_path, "rb") as ffrom, open(new_path, "rb") as fto, \
+        with open(base_snap, "rb") as ffrom, open(new_path, "rb") as fto, \
                 open(patch_path, "wb") as fpatch:
             # heatshrink, and its default window/lookahead: that is the one
             # configuration the device's bundled detools decoder is built for.
@@ -536,7 +558,7 @@ def build_delta_payload(base_path, data, *, verify=True):
 
         if verify:
             out_path = os.path.join(td, "rebuilt.bin")
-            with open(base_path, "rb") as ffrom, open(patch_path, "rb") as fpatch, \
+            with open(base_snap, "rb") as ffrom, open(patch_path, "rb") as fpatch, \
                     open(out_path, "wb") as fto:
                 detools.apply_patch(ffrom, fpatch, fto)
             with open(out_path, "rb") as f:
@@ -567,6 +589,18 @@ def choose_payload(data, info, *, prefer="auto", base_dirs=(), on_note=None):
     if prefer == "raw":
         return "raw", data
 
+    # What actually authenticates a transformed push is the image's OWN appended SHA-256: the wire
+    # digest only proves the payload arrived intact, and reconstruction happens on the device where
+    # this host cannot check it. esp_ota_end() verifies that appended hash before anything is marked
+    # bootable -- but only if the image carries one. Without it the sole integrity left is the ESP
+    # image's one-byte checksum, which is not a guard, so refuse to transform such an image at all.
+    # image_id() returns None in exactly that case, and a raw push does not depend on it.
+    if image_id(data) is None:
+        note("target image carries no appended SHA-256; only a raw push can be verified")
+        if prefer != "auto":
+            raise OtaBleError("transform %r refused: the target image is not hash-verifiable" % prefer)
+        return "raw", data
+
     want = ("delta", "tamp") if prefer == "auto" else (prefer,)
 
     for xform in want:
@@ -583,12 +617,15 @@ def choose_payload(data, info, *, prefer="auto", base_dirs=(), on_note=None):
                 note("delta: no local copy of the running image %s..." % base_id[:12])
                 continue
             try:
-                payload = build_delta_payload(base_path, data)
+                payload = build_delta_payload(base_path, data, expect_base=base_id)
             except ImportError:
                 note("delta: detools not installed")
                 continue
-            except OtaBleError as exc:
-                note("delta: %s" % exc)
+            except Exception as exc:
+                # Anything at all: a detools internal error, a full temp directory, an API change.
+                # Narrower handling let a ValueError out of an `auto` push as a traceback, when the
+                # whole point of `auto` is that it ends in a transfer rather than an exception.
+                note("delta: %s: %s" % (type(exc).__name__, exc))
                 continue
             note("delta against %s" % os.path.basename(base_path))
             return "delta", payload
@@ -601,6 +638,9 @@ def choose_payload(data, info, *, prefer="auto", base_dirs=(), on_note=None):
                 payload = build_tamp_payload(data)
             except ImportError:
                 note("tamp: the tamp package is not installed")
+                continue
+            except Exception as exc:
+                note("tamp: %s: %s" % (type(exc).__name__, exc))
                 continue
             return "tamp", payload
 
@@ -619,6 +659,8 @@ async def query_info(link, *, cmd_prefix="", timeout=15.0):
     seen = asyncio.Event()
 
     def handle(line):
+        if "OTAB FAIL" in line:
+            got["refused"] = True
         m = _RE_INFO.search(line)
         if m:
             got["run"], got["slot"] = m.group(1), int(m.group(2))
@@ -632,18 +674,24 @@ async def query_info(link, *, cmd_prefix="", timeout=15.0):
         if "OTAB FAIL" in line:
             seen.set()
 
+    # Restore, do not clear. Clearing would silently disown a handler the caller installed before
+    # calling us, and the caller has no way to notice until its own lines stop arriving.
+    prev = getattr(link, "_on_line", None)
     link.set_line_handler(handle)
     try:
         await link.write_cmd("%sinfo" % cmd_prefix)
         await asyncio.wait_for(seen.wait(), timeout=timeout)
     except asyncio.TimeoutError:
+        # No answer at all. Distinguishable from an explicit refusal below, because "this receiver
+        # is too old to know `info`" and "the reply was lost" are different facts about the device
+        # even though both end in a raw push.
         return None
     finally:
-        # Leaving it installed would let this closure keep eating the lines the
-        # caller's own handler is about to be waiting for.
-        link.set_line_handler(None)
+        link.set_line_handler(prev)
     # XFORM is emitted last, so its absence means the reply never completed.
-    return got if "xforms" in got else None
+    if "xforms" in got:
+        return got
+    return {"refused": True} if got.get("refused") else None
 
 
 async def push_image(link, data, *, sha=None, cmd_prefix="", on_line=None,

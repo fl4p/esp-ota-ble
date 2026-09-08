@@ -228,6 +228,12 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, ui
     // periodically (keeping the BLE task alive and the link up), and without WDT_PANIC a late idle
     // task logs rather than reboots. A consumer built without those keeps the old, slower, always
     // safe behaviour. Both modes need strictly sequential offsets, which the ring's FIFO drain gives.
+    // Cleared first so the failure path below can tell whether a handle was ever handed out.
+    // esp_ota_begin assigns *out_handle and registers the operation BEFORE it erases, and returns
+    // an erase error without unregistering it (esp_ota_ops.c:181 vs :196-199 in IDF 5.5.1) -- so an
+    // erase I/O failure leaves a live operation that only esp_ota_abort releases. Its earlier
+    // returns never touch *out_handle, which is what makes the zero a reliable discriminator.
+    otaHandle = 0;
 #if defined(CONFIG_SPI_FLASH_YIELD_DURING_ERASE) && !defined(CONFIG_ESP_TASK_WDT_PANIC)
     esp_err_t err = esp_ota_begin(otaPart, outSize, &otaHandle);
 #else
@@ -235,6 +241,7 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, ui
 #endif
     if (err != ESP_OK) {
         emit(OtaBleLevel::Warn, "OTAB FAIL esp_ota_begin %s", esp_err_to_name(err));
+        if (otaHandle) { esp_ota_abort(otaHandle); otaHandle = 0; }
         freeRing();
         quiesce(false);
         return false;
@@ -563,9 +570,14 @@ OtaBleSubmit otaBleSubmitCommand(const char *line) {
         // "begin <wireSize> <wireSha256hex> [<xform> <imageSize>]". The two-argument form is the
         // original protocol and stays exactly what it was: a raw image, wire size == image size.
         const char *p = line + 5;
-        char shaHex[80], xformName[16];
+        char shaHex[80], xformName[16], extra[8];
         unsigned long parsedSize = 0, parsedOut = 0;
-        const int fields = sscanf(p, " %lu %79s %15s %lu", &parsedSize, shaHex, xformName, &parsedOut);
+        // The trailing %7s exists to be REJECTED. Without it sscanf stops at four conversions and
+        // says nothing about the rest of the line, so "begin n sha delta out EXTRA" parsed as a
+        // clean four-field command with EXTRA silently dropped -- a command the host did not mean
+        // to send being executed as one it did.
+        const int fields = sscanf(p, " %lu %79s %15s %lu %7s",
+                                  &parsedSize, shaHex, xformName, &parsedOut, extra);
         if (fields != 2 && fields != 4) return reject("bad-command");
         if (parsedSize == 0 || parsedSize > UINT32_MAX) return reject("bad-size");
         if (strlen(shaHex) != 64 || parseHex32(shaHex, sha) != 0) return reject("bad-sha");

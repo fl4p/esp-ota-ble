@@ -82,6 +82,7 @@ static void begin_case(const char *name) {
 static void end_case() {
     CHECK(!otaBleActive(), "session still active at end of case");
     CHECK(g_fake.liveAllocs == 0, "staging ring leaked (%d live allocs)", g_fake.liveAllocs);
+    CHECK(g_fake.liveOtaOps == 0, "leaked %d IDF OTA operation(s)", g_fake.liveOtaOps);
     // Any FAIL the module reports must be visible at a severity a log filter will not swallow.
     for (auto &s : g_status)
         if (s.line.find("OTAB FAIL") != std::string::npos)
@@ -656,6 +657,49 @@ static void test_tamp_survives_tiny_chunks() {
     end_case();
 }
 
+static void test_tamp_chunk_size_sweep() {
+    // The decompressor may keep decoded output buffered after consuming ALL of its input -- the
+    // output slice fills partway through a match. A feed loop that stops when the input is
+    // consumed loses that tail, and the image comes up short AFTER the slot has been erased.
+    // Sweeping chunk sizes is how that lands on the exact boundary that triggers it.
+    for (size_t chunk : {1u, 2u, 3u, 5u, 7u, 13u, 64u, 127u, 255u, 511u, 512u, 513u, 1024u, 2048u}) {
+        begin_case("tamp chunk sweep");
+        auto img = makeImage(30000);
+        auto wire = tampCompress(img, 12);
+        otaBleSubmitCommand(beginCmdX(wire, "tamp", img.size()).c_str());
+        otaBleTick(0);
+        pushAll(wire, chunk);
+        otaBleSubmitCommand("end");
+        otaBleTick(0);
+        CHECK(g_fake.flashed == img, "chunk=%zu reconstructed %zu of %zu bytes",
+              chunk, g_fake.flashed.size(), img.size());
+        end_case();
+    }
+}
+
+static void test_tamp_strands_no_tail() {
+    // Known-bad calibration for a real defect: tamp can keep decoded output buffered after
+    // consuming ALL of its input, because a match ran past the end of the output slice
+    // (TampDecompressor::skip_bytes is exactly that resumption state). Only the LAST feed of a
+    // stream can strand such a tail -- any earlier one is resumed by the next feed -- so it takes
+    // a specific length to land on it. A 400-wide sweep of image sizes over the real encoder found
+    // 28, of which this is one: 20205 bytes fed 512 at a time. Before otaXformFinish() drained the
+    // decompressor this reconstructed short, and failed AFTER the slot had already been erased.
+    begin_case("tamp strands no tail");
+    std::vector<uint8_t> img(20205);
+    for (size_t i = 0; i < img.size(); ++i) img[i] = (uint8_t) ((i / 311) % 5);
+    auto wire = tampCompress(img, 12);
+    otaBleSubmitCommand(beginCmdX(wire, "tamp", img.size()).c_str());
+    otaBleTick(0);
+    pushAll(wire, 512);
+    otaBleSubmitCommand("end");
+    otaBleTick(0);
+    CHECK(g_fake.flashed == img, "reconstructed %zu of %zu bytes -- a tail was stranded",
+          g_fake.flashed.size(), img.size());
+    CHECK(!sawLine("OTAB FAIL"), "a valid tamp stream was rejected");
+    end_case();
+}
+
 static void test_tamp_window_too_large_is_refused() {
     // The device sizes its window buffer at build time; a host that compressed with a bigger one
     // must be refused rather than silently decoded against a too-small dictionary.
@@ -781,6 +825,45 @@ static void test_delta_truncated_header_is_refused() {
     end_case();
 }
 
+static void test_begin_erase_failure_releases_the_operation() {
+    // esp_ota_begin publishes the handle before it erases and does NOT unregister the operation
+    // when the erase fails, so the caller owns the cleanup. Without the abort, repeated begins
+    // accumulate live operations until IDF runs out of slots -- a slow leak that only shows up on
+    // a board with a failing sector, which is exactly when an OTA needs to still work.
+    begin_case("begin fails during erase");
+    g_fake.failBeginDuringErase = true;
+    auto img = makeImage(20000);
+    otaBleSubmitCommand(beginCmd(img).c_str());
+    otaBleTick(0);
+    CHECK(!otaBleActive(), "session active after a failed begin");
+    CHECK(sawLine("OTAB FAIL esp_ota_begin"), "no begin failure reported");
+    CHECK(g_fake.liveOtaOps == 0, "leaked %d OTA operation(s) on a failed erase", g_fake.liveOtaOps);
+    CHECK(g_fake.bootPart == nullptr, "boot partition moved");
+    end_case();
+}
+
+static void test_begin_rejects_trailing_garbage() {
+    begin_case("begin with trailing garbage");
+    auto img = makeImage(20000);
+    const std::string sha = sha256hex(img);
+    const std::string n = std::to_string(img.size());
+    // Accepted forms, unchanged.
+    CHECK(otaBleSubmitCommand(("begin " + n + " " + sha).c_str()) == OtaBleSubmit::Accepted,
+          "two-field begin rejected");
+    otaBleTick(0);
+    otaBleSubmitCommand("abort");
+    otaBleTick(0);
+    // A fifth token means the host sent something this receiver does not implement. Executing the
+    // four fields it does understand and dropping the rest runs a command nobody asked for.
+    CHECK(otaBleSubmitCommand(("begin " + n + " " + sha + " raw " + n + " EXTRA").c_str())
+              == OtaBleSubmit::Rejected, "begin with a trailing token was accepted");
+    CHECK(otaBleSubmitCommand(("begin " + n + " " + sha + " raw").c_str()) == OtaBleSubmit::Rejected,
+          "begin with a transform but no image size was accepted");
+    otaBleTick(0);
+    CHECK(g_fake.beginCalls == 1, "a malformed begin reached esp_ota_begin");
+    end_case();
+}
+
 int main() {
     printf("ota_ble host tests\n");
     test_happy_path();
@@ -789,6 +872,7 @@ int main() {
     test_sha_mismatch();
     test_oversized();
     test_malformed_commands();
+    test_begin_rejects_trailing_garbage();
     test_credit_overrun();
     test_abort_mid_transfer();
     test_stale_abort_latch();
@@ -801,6 +885,7 @@ int main() {
     test_end_failure();
     test_set_boot_failure();
     test_no_partition();
+    test_begin_erase_failure_releases_the_operation();
     test_ring_wrap();
     test_progress_and_credit();
     test_credit_repeat();
@@ -812,6 +897,8 @@ int main() {
 #if TEST_HAVE_TAMP
     test_tamp_round_trip();
     test_tamp_survives_tiny_chunks();
+    test_tamp_chunk_size_sweep();
+    test_tamp_strands_no_tail();
     test_tamp_window_too_large_is_refused();
     test_tamp_truncated_fails_on_length();
 #endif
