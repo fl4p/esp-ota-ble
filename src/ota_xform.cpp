@@ -5,8 +5,18 @@
 
 #include <esp_heap_caps.h>
 
+// tamp ships under two include layouts and a consumer may have either: the registry component
+// (brianpugh/tamp) exports its root, so the header is <tamp/decompressor.h>, while a vendored copy
+// of the upstream C sources exports the tamp/ directory itself and the header is <decompressor.h>.
+// fugu has the second. Try both, then confirm from the header's OWN include guard rather than from
+// which spelling resolved -- <decompressor.h> is a generic enough name to belong to something else,
+// and "the include worked" is not the same claim as "this is tamp".
 #if __has_include(<tamp/decompressor.h>)
 #include <tamp/decompressor.h>
+#elif __has_include(<decompressor.h>)
+#include <decompressor.h>
+#endif
+#ifdef TAMP_DECOMPRESSOR_H
 #define OTA_XFORM_HAVE_TAMP 1
 #endif
 
