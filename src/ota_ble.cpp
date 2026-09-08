@@ -1,4 +1,5 @@
 #include "ota_ble.h"
+#include "ota_xform.h"
 
 #include <algorithm>
 #include <cstdarg>
@@ -37,11 +38,20 @@ static const esp_partition_t *otaPart = nullptr;
 static mbedtls_sha256_context shaCtx;
 static uint8_t expectedSha[32];
 
+// The wire payload is not necessarily the image. `expectedSize`/`written`/`expectedSha` stay in WIRE
+// bytes -- they drive credit, progress and transfer integrity, all of which are properties of the
+// link -- while `expectedOut`/`imageWritten` track the reconstructed IMAGE the transform emits.
+// For OtaXform::Raw the two are the same thing and every check below collapses to what it was.
+static OtaXform xform = OtaXform::Raw;
+static uint32_t expectedOut = 0;
+static uint32_t imageWritten = 0;
+static uint8_t baseSha[32]; // running image's own validation hash; the base a delta patches from
+
 static bool active = false;
 static bool failed = false;
 static volatile bool abortReq = false; // set from any task; consumed by the consumer tick
 static uint32_t expectedSize = 0;
-static uint32_t written = 0;    // flushed to flash (consumer)
+static uint32_t written = 0;    // wire bytes consumed by the transform (consumer)
 // Consumer-only timing of the flash drain. esp_ota_write() with OTA_WITH_SEQUENTIAL_WRITES erases
 // each 4 KB sector as it first crosses it, so its cost is bimodal: a plain page program, or a
 // program plus a sector erase. Reported once at OTAB OK so a host can attribute a slow transfer to
@@ -64,11 +74,35 @@ static OtaBleHooks hooks;
 // Single-slot command latch. The protocol is strictly one command at a time -- the host always waits
 // for a status line before sending the next -- so a second command arriving before the consumer has
 // drained the first is a host bug, and is reported as one rather than silently overwriting.
-enum class PendingCmd { None, Begin, End, Abort };
+enum class PendingCmd { None, Begin, End, Abort, Info };
 static PendingCmd pending = PendingCmd::None;
 static uint32_t pendSize = 0;
+static uint32_t pendOut = 0;
+static OtaXform pendXform = OtaXform::Raw;
 static uint8_t pendSha[32];
 static std::mutex cmdMutex;
+
+/// Transform sink: reconstructed image bytes on their way to the passive partition.
+/// A failure here is flash refusing the write; a failure anywhere else under otaXformFeed is the
+/// payload failing to reconstruct. The two send a host to completely different places -- a bad slot
+/// versus a bad patch -- so the drain reports them as different lines rather than one "write" error.
+static bool sinkFailed = false;
+
+static esp_err_t xformSink(const uint8_t *data, size_t len, void *) {
+    const esp_err_t err = esp_ota_write(otaHandle, data, len);
+    if (err != ESP_OK) { sinkFailed = true; return err; }
+    imageWritten += (uint32_t) len;
+    return ESP_OK;
+}
+
+/// Transform source, for Delta only: the base image, which is the one we are running from. Reading
+/// the active partition while writing the passive one is safe -- esp_partition_read goes through the
+/// flash driver's cache guard, not through the instruction cache we are executing out of.
+static esp_err_t xformSrc(uint8_t *buf, size_t len, uint32_t offset, void *) {
+    const esp_partition_t *run = esp_ota_get_running_partition();
+    if (!run) return ESP_ERR_INVALID_STATE;
+    return esp_partition_read(run, offset, buf, len);
+}
 
 static void emit(OtaBleLevel level, const char *fmt, ...) {
     if (!hooks.status) return;
@@ -127,18 +161,53 @@ static void repeatCredit(uint32_t nowMs) {
     emit(OtaBleLevel::Info, "OTAB CRED %u", (unsigned) lastGranted);
 }
 
+/// Consumer task. Answer "what are you running, and what can you accept?" -- everything a host
+/// needs to decide between a delta, a compressed push and a raw one, before it commits to any.
+/// Three short lines rather than one: a host still on the default 23-byte ATT MTU can only carry
+/// 20 bytes per notification, and a single combined line would be silently truncated there.
+static void reportInfo() {
+    const esp_partition_t *run = esp_ota_get_running_partition();
+    if (!run) { emit(OtaBleLevel::Warn, "OTAB FAIL no-partition"); return; }
+    const esp_partition_t *next = esp_ota_get_next_update_partition(nullptr);
+    emit(OtaBleLevel::Info, "OTAB INFO run=%s slot=%u", run->label,
+         (unsigned) (next ? next->size : 0));
+
+    uint8_t sha[32];
+    if (esp_partition_get_sha256(run, sha) == ESP_OK) {
+        char hex[65];
+        for (int i = 0; i < 32; ++i) snprintf(hex + i * 2, 3, "%02x", sha[i]);
+        emit(OtaBleLevel::Info, "OTAB BASE %s", hex);
+    } else {
+        // Without this a host cannot tell "no delta possible" from "the reply was lost", and the
+        // difference decides whether it falls back or retries.
+        emit(OtaBleLevel::Warn, "OTAB BASE none");
+    }
+
+    char list[48];
+    int n = snprintf(list, sizeof(list), "raw");
+    if (otaXformAvailable(OtaXform::Tamp)) n += snprintf(list + n, sizeof(list) - n, ",tamp");
+    if (otaXformAvailable(OtaXform::Delta)) snprintf(list + n, sizeof(list) - n, ",delta");
+    emit(OtaBleLevel::Info, "OTAB XFORM %s", list);
+}
+
 void otaBleInit(const OtaBleHooks &h) { hooks = h; }
 
 bool otaBleActive() { return active; }
 
-static bool beginWithDigest(uint32_t size, const uint8_t sha[32]) {
+static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, uint32_t outSize) {
     if (active) { emit(OtaBleLevel::Warn, "OTAB FAIL already-active"); return false; }
     otaPart = esp_ota_get_next_update_partition(nullptr);
     if (!otaPart) { emit(OtaBleLevel::Warn, "OTAB FAIL no-partition"); return false; }
-    if (size == 0 || size > otaPart->size) {
-        emit(OtaBleLevel::Warn, "OTAB FAIL size %u > part %u", (unsigned) size, (unsigned) otaPart->size);
+    // The IMAGE has to fit the slot; that is the only size bound worth enforcing here. The wire
+    // payload is deliberately NOT required to be smaller than the image: a transform that expands
+    // is pointless but not unsafe, and tamp genuinely does expand incompressible input, so the
+    // "obvious" wire <= image rule would reject a legitimate push. What actually protects the slot
+    // is the length check at the end -- imageWritten must equal outSize before anything boots.
+    if (outSize == 0 || outSize > otaPart->size) {
+        emit(OtaBleLevel::Warn, "OTAB FAIL size %u > part %u", (unsigned) outSize, (unsigned) otaPart->size);
         return false;
     }
+    if (size == 0) { emit(OtaBleLevel::Warn, "OTAB FAIL bad-size"); return false; }
     ring = (uint8_t *) heap_caps_malloc(RING_CAP, MALLOC_CAP_SPIRAM);
     if (!ring) ring = (uint8_t *) heap_caps_malloc(RING_CAP, MALLOC_CAP_DEFAULT); // PSRAM-less fallback
     if (!ring) { emit(OtaBleLevel::Warn, "OTAB FAIL no-mem"); return false; }
@@ -160,7 +229,7 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32]) {
     // task logs rather than reboots. A consumer built without those keeps the old, slower, always
     // safe behaviour. Both modes need strictly sequential offsets, which the ring's FIFO drain gives.
 #if defined(CONFIG_SPI_FLASH_YIELD_DURING_ERASE) && !defined(CONFIG_ESP_TASK_WDT_PANIC)
-    esp_err_t err = esp_ota_begin(otaPart, size, &otaHandle);
+    esp_err_t err = esp_ota_begin(otaPart, outSize, &otaHandle);
 #else
     esp_err_t err = esp_ota_begin(otaPart, OTA_WITH_SEQUENTIAL_WRITES, &otaHandle);
 #endif
@@ -170,29 +239,68 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32]) {
         quiesce(false);
         return false;
     }
+    // A delta patch names the base it was built against. Hash the running image now so the
+    // transform can reject a patch aimed at a different one -- the digest is over 1.7 MB of flash,
+    // but it is read once per session and only when a delta actually asked for it.
+    if (x == OtaXform::Delta) {
+        const esp_partition_t *run = esp_ota_get_running_partition();
+        if (!run || esp_partition_get_sha256(run, baseSha) != ESP_OK) {
+            emit(OtaBleLevel::Warn, "OTAB FAIL no-base");
+            esp_ota_abort(otaHandle);
+            otaHandle = 0;
+            freeRing();
+            quiesce(false);
+            return false;
+        }
+    }
+
+    OtaXformIo io;
+    io.write = &xformSink;
+    io.read = &xformSrc;
+    io.baseDigest = baseSha;
+    const char *xerr = "xform";
+    if (!otaXformBegin(x, outSize, io, &xerr)) {
+        emit(OtaBleLevel::Warn, "OTAB FAIL %s", xerr);
+        esp_ota_abort(otaHandle);
+        otaHandle = 0;
+        freeRing();
+        quiesce(false);
+        return false;
+    }
+
     mbedtls_sha256_init(&shaCtx);
     mbedtls_sha256_starts(&shaCtx, 0); // 0 = SHA-256
     rHead = rTail = rCount = 0;
+    xform = x;
     expectedSize = size;
+    expectedOut = outSize;
+    imageWritten = 0;
     written = staged = lastGranted = lastProg = 0;
+    sinkFailed = false;
     wrUs = 0; wrCalls = wrSlowCalls = wrMaxUs = 0;
     failed = false;
     abortReq = false; // an abort aimed at a previous session must not poison this one
     creditRepeatArmed = false;
     stallArmed = false;
     active = true;
-    emit(OtaBleLevel::Info, "OTAB READY part=%s size=%u", otaPart->label, (unsigned) size);
+    emit(OtaBleLevel::Info, "OTAB READY part=%s size=%u xform=%s out=%u",
+         otaPart->label, (unsigned) size, otaXformName(x), (unsigned) outSize);
     grantCredit();
     return true;
 }
 
-bool otaBleBegin(uint32_t size, const char *sha256hex) {
+bool otaBleBegin(uint32_t size, const char *sha256hex, const char *xformName, uint32_t outSize) {
     uint8_t sha[32];
     if (!sha256hex || strlen(sha256hex) != 64 || parseHex32(sha256hex, sha) != 0) {
         emit(OtaBleLevel::Warn, "OTAB FAIL bad-sha");
         return false;
     }
-    return beginWithDigest(size, sha);
+    OtaXform x = OtaXform::Raw;
+    if (xformName && !otaXformParse(xformName, &x)) {
+        emit(OtaBleLevel::Warn, "OTAB FAIL bad-xform");
+        return false;
+    }
+    return beginWithDigest(size, sha, x, x == OtaXform::Raw ? size : outSize);
 }
 
 void otaBleStageBytes(const uint8_t *data, size_t len) {
@@ -262,16 +370,21 @@ static bool drainRing() {
             rTail = (rTail + n) % RING_CAP;
             rCount -= n;
         }
-        // Flash write happens outside the lock so the producer's stage call never blocks on flash I/O.
+        // Transform + flash write happen outside the lock so the producer's stage call never blocks
+        // on flash I/O. For Raw this is exactly the esp_ota_write it replaced; for Tamp and Delta the
+        // timing below now covers reconstruction as well, which is the point -- it is what tells a
+        // host whether a smaller payload actually bought anything.
         const int64_t t0 = esp_timer_get_time();
-        esp_err_t err = esp_ota_write(otaHandle, slice, n);
+        sinkFailed = false;
+        esp_err_t err = otaXformFeed(slice, n);
         const uint32_t dt = (uint32_t) (esp_timer_get_time() - t0);
         wrUs += dt;
         wrCalls++;
         if (dt > 5000) wrSlowCalls++;
         if (dt > wrMaxUs) wrMaxUs = dt;
         if (err != ESP_OK) {
-            emit(OtaBleLevel::Error, "OTAB FAIL esp_ota_write %s", esp_err_to_name(err));
+            emit(OtaBleLevel::Error, sinkFailed ? "OTAB FAIL esp_ota_write %s" : "OTAB FAIL xform %s",
+                 esp_err_to_name(err));
             { std::lock_guard<std::mutex> lk(ringMutex); failed = true; }
             otaBleAbort();
             return false;
@@ -285,9 +398,9 @@ static bool drainRing() {
             lastProg = written;
             emit(OtaBleLevel::Info, "OTAB PROG %u/%u", (unsigned) written, (unsigned) expectedSize);
             if (written == expectedSize) {
-                emit(OtaBleLevel::Info, "OTAB STAT write_ms=%u calls=%u slow=%u max_ms=%u",
+                emit(OtaBleLevel::Info, "OTAB STAT write_ms=%u calls=%u slow=%u max_ms=%u out=%u",
                      (unsigned) (wrUs / 1000), (unsigned) wrCalls,
-                     (unsigned) wrSlowCalls, (unsigned) (wrMaxUs / 1000));
+                     (unsigned) wrSlowCalls, (unsigned) (wrMaxUs / 1000), (unsigned) imageWritten);
             }
         }
         grantCredit();
@@ -299,19 +412,23 @@ void otaBleTick(uint32_t nowMs) {
     // Latched commands run here, never on the producer task: begin and end block on flash for far
     // longer than a BLE host callback may.
     PendingCmd cmd;
-    uint32_t size;
+    uint32_t size, outSize;
+    OtaXform x;
     uint8_t sha[32];
     {
         std::lock_guard<std::mutex> lk(cmdMutex);
         cmd = pending;
         size = pendSize;
+        outSize = pendOut;
+        x = pendXform;
         memcpy(sha, pendSha, 32);
     }
     if (cmd != PendingCmd::None) {
         switch (cmd) {
-            case PendingCmd::Begin: beginWithDigest(size, sha); break;
+            case PendingCmd::Begin: beginWithDigest(size, sha, x, outSize); break;
             case PendingCmd::End:   otaBleEnd(); break; // reboots and does not return, on success
             case PendingCmd::Abort: otaBleAbort(); break;
+            case PendingCmd::Info:  reportInfo(); break;
             case PendingCmd::None:  break;
         }
         bool cancelStartedBegin;
@@ -349,13 +466,30 @@ bool otaBleEnd() {
     uint8_t got[32];
     mbedtls_sha256_finish(&shaCtx, got);
     if (memcmp(got, expectedSha, 32) != 0) {
+        // Checked before the transform is finalised: this says the LINK corrupted the payload, and
+        // it is the one diagnosis a failed reconstruction would otherwise mask with its own error.
         emit(OtaBleLevel::Warn, "OTAB FAIL sha-mismatch");
+        otaBleAbort();
+        return false;
+    }
+    esp_err_t ferr = otaXformFinish();
+    if (ferr != ESP_OK) {
+        emit(OtaBleLevel::Warn, "OTAB FAIL xform-finish %s", esp_err_to_name(ferr));
+        otaBleAbort();
+        return false;
+    }
+    // The payload arrived intact and still did not rebuild the image we were promised. For Raw this
+    // is unreachable (the transform is a memcpy of bytes already counted); for Tamp and Delta it is
+    // the check that stops a truncated or wrong-base reconstruction from being flagged bootable.
+    if (imageWritten != expectedOut) {
+        emit(OtaBleLevel::Warn, "OTAB FAIL out %u/%u", (unsigned) imageWritten, (unsigned) expectedOut);
         otaBleAbort();
         return false;
     }
     esp_err_t err = esp_ota_end(otaHandle); // image validation (magic, esp_app_desc, signature)
     if (err != ESP_OK) {
         emit(OtaBleLevel::Warn, "OTAB FAIL esp_ota_end %s", esp_err_to_name(err));
+        otaXformEnd();
         mbedtls_sha256_free(&shaCtx);
         { std::lock_guard<std::mutex> lk(ringMutex); active = false; freeRing(); }
         otaHandle = 0;
@@ -363,6 +497,7 @@ bool otaBleEnd() {
         return false;
     }
     err = esp_ota_set_boot_partition(otaPart);
+    otaXformEnd();
     mbedtls_sha256_free(&shaCtx);
     { std::lock_guard<std::mutex> lk(ringMutex); active = false; freeRing(); }
     otaHandle = 0;
@@ -397,6 +532,7 @@ void otaBleRequestAbort() {
 void otaBleAbort() {
     if (!active) return;
     { std::lock_guard<std::mutex> lk(ringMutex); active = false; freeRing(); }
+    otaXformEnd();
     if (otaHandle) { esp_ota_abort(otaHandle); otaHandle = 0; }
     mbedtls_sha256_free(&shaCtx);
     quiesce(false);
@@ -419,27 +555,44 @@ OtaBleSubmit otaBleSubmitCommand(const char *line) {
     while (*line == ' ') ++line;
 
     PendingCmd cmd;
-    uint32_t size = 0;
+    uint32_t size = 0, outSize = 0;
+    OtaXform x = OtaXform::Raw;
     uint8_t sha[32];
 
     if (strncmp(line, "begin", 5) == 0 && (line[5] == ' ' || line[5] == '\0')) {
+        // "begin <wireSize> <wireSha256hex> [<xform> <imageSize>]". The two-argument form is the
+        // original protocol and stays exactly what it was: a raw image, wire size == image size.
         const char *p = line + 5;
-        char shaHex[80];
-        unsigned long parsedSize = 0;
-        if (sscanf(p, " %lu %79s", &parsedSize, shaHex) != 2) return reject("bad-command");
+        char shaHex[80], xformName[16];
+        unsigned long parsedSize = 0, parsedOut = 0;
+        const int fields = sscanf(p, " %lu %79s %15s %lu", &parsedSize, shaHex, xformName, &parsedOut);
+        if (fields != 2 && fields != 4) return reject("bad-command");
         if (parsedSize == 0 || parsedSize > UINT32_MAX) return reject("bad-size");
         if (strlen(shaHex) != 64 || parseHex32(shaHex, sha) != 0) return reject("bad-sha");
+        if (fields == 4) {
+            if (!otaXformParse(xformName, &x)) return reject("bad-xform");
+            // Answer "can this build do that?" here rather than at execution time: the host has to
+            // pick a fallback, and by then it would already have committed to the transfer.
+            if (!otaXformAvailable(x)) return reject("xform-unsupported");
+            if (parsedOut == 0 || parsedOut > UINT32_MAX) return reject("bad-size");
+            outSize = (uint32_t) parsedOut;
+        } else {
+            outSize = (uint32_t) parsedSize;
+        }
         // Reject an oversized image before anything is latched, so the host learns synchronously
         // rather than via an async failure after the consumer has already quiesced sampling.
         const esp_partition_t *next = esp_ota_get_next_update_partition(nullptr);
         if (!next) return reject("no-partition");
-        if (parsedSize > next->size) {
+        if (outSize > next->size) {
             emit(OtaBleLevel::Warn, "OTAB FAIL size %u > part %u",
-                 (unsigned) parsedSize, (unsigned) next->size);
+                 (unsigned) outSize, (unsigned) next->size);
             return OtaBleSubmit::Rejected;
         }
         size = (uint32_t) parsedSize;
         cmd = PendingCmd::Begin;
+    } else if (strncmp(line, "info", 4) == 0 && (line[4] == ' ' || line[4] == '\0' ||
+                                                 line[4] == '\r' || line[4] == '\n')) {
+        cmd = PendingCmd::Info;
     } else if (strncmp(line, "end", 3) == 0 && (line[3] == ' ' || line[3] == '\0' ||
                                                 line[3] == '\r' || line[3] == '\n')) {
         cmd = PendingCmd::End;
@@ -454,6 +607,8 @@ OtaBleSubmit otaBleSubmitCommand(const char *line) {
     if (pending != PendingCmd::None) return reject("busy");
     pending = cmd;
     pendSize = size;
+    pendOut = outSize;
+    pendXform = x;
     if (cmd == PendingCmd::Begin) memcpy(pendSha, sha, 32);
     return OtaBleSubmit::Accepted;
 }

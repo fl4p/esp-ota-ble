@@ -11,6 +11,12 @@
 
 #include "fake_ota.h"
 #include "ota_ble.h"
+#include "ota_xform.h"
+
+#if __has_include(<tamp/compressor.h>)
+#include <tamp/compressor.h>
+#define TEST_HAVE_TAMP 1
+#endif
 
 // ---------------------------------------------------------------- harness
 
@@ -126,6 +132,48 @@ static void pushAll(const std::vector<uint8_t> &img, size_t chunk = 512, int dra
         }
     }
     otaBleTick(0);
+}
+
+/// "begin" for a transformed payload: wire size/digest describe `wire`, `outSize` the image it
+/// rebuilds to. Deliberately built from the same sha256hex() as the raw form -- if the digest ever
+/// stopped covering exactly the bytes that go over the link, every one of these cases would break.
+static std::string beginCmdX(const std::vector<uint8_t> &wire, const char *xform, size_t outSize) {
+    return "begin " + std::to_string(wire.size()) + " " + sha256hex(wire) + " " + xform + " " +
+           std::to_string(outSize);
+}
+
+#if TEST_HAVE_TAMP
+/// Compress with the real tamp encoder, so the decompress loop under test faces genuine streams
+/// (partial token consumption, output-full cycles) rather than a mock of its own behaviour.
+static std::vector<uint8_t> tampCompress(const std::vector<uint8_t> &in, uint8_t windowBits) {
+    std::vector<unsigned char> window((size_t) 1 << windowBits);
+    TampConf conf = {};
+    conf.window = windowBits;
+    conf.literal = 8;
+    conf.use_custom_dictionary = false;
+    TampCompressor c;
+    if (tamp_compressor_init(&c, &conf, window.data()) != TAMP_OK) return {};
+
+    std::vector<uint8_t> out(in.size() * 2 + 64);
+    size_t written = 0, consumed = 0;
+    const tamp_res res = tamp_compressor_compress_and_flush(
+            &c, out.data(), out.size(), &written, in.data(), in.size(), &consumed, false);
+    if (res != TAMP_OK || consumed != in.size()) return {};
+    out.resize(written);
+    return out;
+}
+#endif
+
+/// A delta patch container: 4-byte magic, the base digest, reserved to 64 bytes, then the patch.
+/// The host-stub esp_delta_ota passes the patch through unchanged, so `patch` is what must reach
+/// flash -- which makes "the header was stripped, exactly once, at exactly 64 bytes" observable.
+static std::vector<uint8_t> deltaWire(const uint8_t digest[32], const std::vector<uint8_t> &patch) {
+    std::vector<uint8_t> w(64, 0);
+    const uint32_t magic = 0xfccdde10;
+    memcpy(w.data(), &magic, 4);
+    memcpy(w.data() + 4, digest, 32);
+    w.insert(w.end(), patch.begin(), patch.end());
+    return w;
 }
 
 // ---------------------------------------------------------------- cases
@@ -488,6 +536,251 @@ static void test_credit_repeat() {
     end_case();
 }
 
+// ------------------------------------------------- payload transforms
+
+static void test_raw_xform_is_the_old_protocol() {
+    // The four-argument form naming "raw" must be indistinguishable from the two-argument form.
+    begin_case("explicit raw xform");
+    auto img = makeImage(20000);
+    CHECK(otaBleSubmitCommand(beginCmdX(img, "raw", img.size()).c_str()) == OtaBleSubmit::Accepted,
+          "explicit raw begin rejected");
+    otaBleTick(0);
+    pushAll(img);
+    otaBleSubmitCommand("end");
+    otaBleTick(0);
+    CHECK(g_fake.flashed == img, "explicit raw did not flash the image verbatim");
+    CHECK(g_restarted, "did not restart");
+    end_case();
+}
+
+static void test_xform_unknown_and_unavailable() {
+    begin_case("unknown xform rejected");
+    auto img = makeImage(1000);
+    CHECK(otaBleSubmitCommand(beginCmdX(img, "brotli", img.size()).c_str()) == OtaBleSubmit::Rejected,
+          "unknown transform accepted");
+    CHECK(sawLine("bad-xform"), "no bad-xform diagnosis");
+    // Rejected at submit, so nothing was latched and nothing quiesced the consumer's sampling.
+    otaBleTick(0);
+    CHECK(!otaBleActive(), "unknown transform started a session");
+    CHECK(g_fake.beginCalls == 0, "unknown transform reached esp_ota_begin");
+    CHECK(g_quiesce.empty(), "unknown transform halted sampling");
+    end_case();
+}
+
+static void test_xform_wire_may_exceed_the_image() {
+    // Deliberately allowed. A transform that expands is pointless but not unsafe, and tamp does
+    // expand incompressible input -- rejecting wire > image here would refuse a legitimate push.
+    // The guard that matters is the reconstructed length, which this case also exercises: the
+    // payload is 64 bytes longer than the image it claims, so the session must still fail.
+    begin_case("wire may exceed the image");
+    auto img = makeImage(20000);
+    auto wire = deltaWire(g_fake.baseSha, img); // 64 bytes of container on top of a 20000-byte body
+    CHECK(otaBleSubmitCommand(beginCmdX(wire, "delta", img.size() - 64).c_str()) == OtaBleSubmit::Accepted,
+          "an expanding payload was rejected up front");
+    otaBleTick(0);
+    pushAll(wire);
+    otaBleSubmitCommand("end");
+    otaBleTick(0);
+    CHECK(sawLine("OTAB FAIL out"), "over-long reconstruction was not caught by the length check");
+    CHECK(g_fake.bootPart == nullptr, "boot partition moved on a wrong-length image");
+    end_case();
+}
+
+static void test_info_reports_base_and_transforms() {
+    begin_case("info");
+    for (int i = 0; i < 32; ++i) g_fake.baseSha[i] = (uint8_t) (0xA0 + i);
+    CHECK(otaBleSubmitCommand("info") == OtaBleSubmit::Accepted, "info rejected");
+    otaBleTick(0);
+    const Status *base = findLine("OTAB BASE ");
+    CHECK(base != nullptr, "no OTAB BASE line");
+    if (base) CHECK(base->line.find("a0a1a2a3") != std::string::npos,
+                    "BASE does not carry the running digest: %s", base->line.c_str());
+    CHECK(sawLine("OTAB INFO run=app0"), "INFO did not name the RUNNING slot");
+    const Status *x = findLine("OTAB XFORM ");
+    CHECK(x != nullptr, "no OTAB XFORM line");
+    if (x) {
+        CHECK(x->line.find("raw") != std::string::npos, "XFORM omits raw");
+        CHECK((x->line.find("delta") != std::string::npos) == otaXformAvailable(OtaXform::Delta),
+              "XFORM disagrees with otaXformAvailable: %s", x->line.c_str());
+    }
+    // Every reply must be readable on a 20-byte-payload link, or a default-MTU host sees fragments.
+    for (auto &st : g_status) CHECK(st.line.size() < 80, "status line too long: %s", st.line.c_str());
+    end_case();
+}
+
+static void test_info_when_the_base_cannot_be_hashed() {
+    // "no delta possible" and "the reply was lost" must not look the same to a host: one means fall
+    // back to a full push, the other means retry.
+    begin_case("info without a base digest");
+    g_fake.failBaseSha = true;
+    otaBleSubmitCommand("info");
+    otaBleTick(0);
+    CHECK(sawLine("OTAB BASE none"), "a failed base hash reported nothing");
+    end_case();
+}
+
+#if TEST_HAVE_TAMP
+static void test_tamp_round_trip() {
+    begin_case("tamp round trip");
+    auto img = makeImage(20000);
+    auto wire = tampCompress(img, 12);
+    CHECK(!wire.empty(), "tamp compression produced nothing");
+    CHECK(wire.size() < img.size(), "tamp payload (%zu) not smaller than the image (%zu)",
+          wire.size(), img.size());
+    CHECK(otaBleSubmitCommand(beginCmdX(wire, "tamp", img.size()).c_str()) == OtaBleSubmit::Accepted,
+          "tamp begin rejected");
+    otaBleTick(0);
+    CHECK(sawLine("xform=tamp"), "READY did not echo the transform");
+    pushAll(wire);
+    otaBleSubmitCommand("end");
+    otaBleTick(0);
+    CHECK(g_fake.flashed == img, "tamp did not reconstruct the image (%zu of %zu bytes)",
+          g_fake.flashed.size(), img.size());
+    CHECK(g_fake.bootPart != nullptr, "boot partition not set");
+    CHECK(!sawLine("OTAB FAIL"), "unexpected FAIL");
+    end_case();
+}
+
+static void test_tamp_survives_tiny_chunks() {
+    // The decompressor consumes input and produces output on independent schedules. Feeding it in
+    // 3-byte slices forces the input-exhausted and output-full paths the 512-byte case never sees.
+    begin_case("tamp in tiny chunks");
+    auto img = makeImage(9000);
+    auto wire = tampCompress(img, 12);
+    otaBleSubmitCommand(beginCmdX(wire, "tamp", img.size()).c_str());
+    otaBleTick(0);
+    pushAll(wire, 3);
+    otaBleSubmitCommand("end");
+    otaBleTick(0);
+    CHECK(g_fake.flashed == img, "chunked tamp did not reconstruct the image");
+    end_case();
+}
+
+static void test_tamp_window_too_large_is_refused() {
+    // The device sizes its window buffer at build time; a host that compressed with a bigger one
+    // must be refused rather than silently decoded against a too-small dictionary.
+    begin_case("tamp window too large");
+    auto img = makeImage(9000);
+    auto wire = tampCompress(img, 14);
+    CHECK(!wire.empty(), "w=14 compression produced nothing");
+    otaBleSubmitCommand(beginCmdX(wire, "tamp", img.size()).c_str());
+    otaBleTick(0);
+    pushAll(wire);
+    CHECK(sawLine("OTAB FAIL xform"), "an oversized tamp window was accepted");
+    CHECK(g_fake.bootPart == nullptr, "boot partition moved on a refused stream");
+    otaBleTick(0);
+    end_case();
+}
+
+static void test_tamp_truncated_fails_on_length() {
+    begin_case("tamp truncated");
+    auto img = makeImage(20000);
+    auto wire = tampCompress(img, 12);
+    wire.resize(wire.size() / 2);
+    otaBleSubmitCommand(beginCmdX(wire, "tamp", img.size()).c_str());
+    otaBleTick(0);
+    pushAll(wire);
+    otaBleSubmitCommand("end");
+    otaBleTick(0);
+    // The wire arrived whole and hashed correctly; it simply does not rebuild a full image.
+    CHECK(sawLine("OTAB FAIL out"), "a truncated tamp stream was not caught by the image length");
+    CHECK(g_fake.bootPart == nullptr, "boot partition moved on a short image");
+    end_case();
+}
+#endif // TEST_HAVE_TAMP
+
+static void test_delta_strips_its_header() {
+    begin_case("delta header");
+    for (int i = 0; i < 32; ++i) g_fake.baseSha[i] = (uint8_t) (i * 3 + 1);
+    auto patch = makeImage(5000);
+    auto wire = deltaWire(g_fake.baseSha, patch);
+    CHECK(otaBleSubmitCommand(beginCmdX(wire, "delta", patch.size()).c_str()) == OtaBleSubmit::Accepted,
+          "delta begin rejected");
+    otaBleTick(0);
+    pushAll(wire);
+    otaBleSubmitCommand("end");
+    otaBleTick(0);
+    CHECK(g_fake.flashed == patch, "delta wrote %zu bytes, expected the %zu-byte patch body",
+          g_fake.flashed.size(), patch.size());
+    CHECK(g_restarted, "did not restart");
+    end_case();
+}
+
+static void test_delta_header_split_across_chunks() {
+    // The 64-byte header arrives over many BLE writes. Feeding 7 bytes at a time puts a boundary
+    // inside the magic, inside the digest, and on the header/body seam.
+    begin_case("delta header split");
+    for (int i = 0; i < 32; ++i) g_fake.baseSha[i] = (uint8_t) (i * 3 + 1);
+    auto patch = makeImage(2000);
+    auto wire = deltaWire(g_fake.baseSha, patch);
+    otaBleSubmitCommand(beginCmdX(wire, "delta", patch.size()).c_str());
+    otaBleTick(0);
+    pushAll(wire, 7);
+    otaBleSubmitCommand("end");
+    otaBleTick(0);
+    CHECK(g_fake.flashed == patch, "split header corrupted the patch body");
+    end_case();
+}
+
+static void test_delta_wrong_base_is_refused() {
+    // The whole risk of delta: a patch applied to the wrong base produces a plausible image that
+    // fails only at boot. It has to be caught before anything is marked bootable.
+    begin_case("delta wrong base");
+    for (int i = 0; i < 32; ++i) g_fake.baseSha[i] = (uint8_t) (i * 3 + 1);
+    uint8_t other[32];
+    for (int i = 0; i < 32; ++i) other[i] = (uint8_t) (i * 3 + 2);
+    auto wire = deltaWire(other, makeImage(5000));
+    otaBleSubmitCommand(beginCmdX(wire, "delta", 5000).c_str());
+    otaBleTick(0);
+    pushAll(wire);
+    CHECK(sawLine("OTAB FAIL xform"), "a patch against the wrong base was accepted");
+    CHECK(g_fake.bootPart == nullptr, "boot partition moved on a wrong-base patch");
+    CHECK(g_fake.flashed.empty(), "wrong-base patch reached flash");
+    otaBleTick(0);
+    end_case();
+}
+
+static void test_delta_bad_magic_is_refused() {
+    begin_case("delta bad magic");
+    auto wire = deltaWire(g_fake.baseSha, makeImage(5000));
+    wire[0] ^= 0xFF;
+    otaBleSubmitCommand(beginCmdX(wire, "delta", 5000).c_str());
+    otaBleTick(0);
+    pushAll(wire);
+    CHECK(sawLine("OTAB FAIL xform"), "a patch with a bad magic was accepted");
+    CHECK(g_fake.bootPart == nullptr, "boot partition moved");
+    otaBleTick(0);
+    end_case();
+}
+
+static void test_delta_header_only_is_refused() {
+    // A payload that is all container and no patch must not look like a complete transfer.
+    begin_case("delta header only");
+    auto wire = deltaWire(g_fake.baseSha, {});
+    otaBleSubmitCommand(beginCmdX(wire, "delta", 5000).c_str());
+    otaBleTick(0);
+    pushAll(wire);
+    otaBleSubmitCommand("end");
+    otaBleTick(0);
+    CHECK(sawLine("OTAB FAIL out"), "a header-only delta was not rejected");
+    CHECK(g_fake.bootPart == nullptr, "boot partition moved");
+    end_case();
+}
+
+static void test_delta_truncated_header_is_refused() {
+    begin_case("delta truncated header");
+    auto wire = deltaWire(g_fake.baseSha, {});
+    wire.resize(40);
+    otaBleSubmitCommand(beginCmdX(wire, "delta", 5000).c_str());
+    otaBleTick(0);
+    pushAll(wire);
+    otaBleSubmitCommand("end");
+    otaBleTick(0);
+    CHECK(sawLine("OTAB FAIL"), "a truncated container header was accepted");
+    CHECK(g_fake.bootPart == nullptr, "boot partition moved");
+    end_case();
+}
+
 int main() {
     printf("ota_ble host tests\n");
     test_happy_path();
@@ -511,6 +804,23 @@ int main() {
     test_ring_wrap();
     test_progress_and_credit();
     test_credit_repeat();
+    test_raw_xform_is_the_old_protocol();
+    test_xform_unknown_and_unavailable();
+    test_xform_wire_may_exceed_the_image();
+    test_info_reports_base_and_transforms();
+    test_info_when_the_base_cannot_be_hashed();
+#if TEST_HAVE_TAMP
+    test_tamp_round_trip();
+    test_tamp_survives_tiny_chunks();
+    test_tamp_window_too_large_is_refused();
+    test_tamp_truncated_fails_on_length();
+#endif
+    test_delta_strips_its_header();
+    test_delta_header_split_across_chunks();
+    test_delta_wrong_base_is_refused();
+    test_delta_bad_magic_is_refused();
+    test_delta_header_only_is_refused();
+    test_delta_truncated_header_is_refused();
 
     if (g_failures) {
         printf("\n%d check(s) FAILED\n", g_failures);

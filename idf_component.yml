@@ -1,0 +1,11 @@
+## IDF Component Manager Manifest File
+description: "OTA firmware update pushed over BLE, with payload transforms"
+dependencies:
+  idf:
+    version: ">=5.0"
+  # Wire-payload transforms (src/ota_xform.cpp). Both shrink what has to cross a saturated BLE link:
+  # tamp compresses a full image to ~69 %, esp_delta_ota carries a patch against the running image
+  # at ~9 %. Neither is needed to build -- see the __has_include guards -- but an IDF consumer that
+  # skipped them would only discover the gap as a runtime "xform-unsupported".
+  brianpugh/tamp: "^1.6.0"
+  espressif/esp_delta_ota: "^1.1.0"

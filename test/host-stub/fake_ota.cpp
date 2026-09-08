@@ -17,6 +17,7 @@
 #include <cstring>
 
 #include <esp_heap_caps.h>
+#include <esp_partition.h>
 #include <esp_system.h>
 
 FakeOta g_fake;
@@ -42,9 +43,38 @@ const char *esp_err_to_name(esp_err_t err) {
         case ESP_ERR_NO_MEM: return "ESP_ERR_NO_MEM";
         case ESP_ERR_INVALID_ARG: return "ESP_ERR_INVALID_ARG";
         case ESP_ERR_INVALID_SIZE: return "ESP_ERR_INVALID_SIZE";
+        case ESP_ERR_INVALID_STATE: return "ESP_ERR_INVALID_STATE";
+        case ESP_ERR_NOT_SUPPORTED: return "ESP_ERR_NOT_SUPPORTED";
+        case ESP_ERR_INVALID_CRC: return "ESP_ERR_INVALID_CRC";
+        case ESP_ERR_INVALID_VERSION: return "ESP_ERR_INVALID_VERSION";
         case ESP_ERR_OTA_VALIDATE_FAILED: return "ESP_ERR_OTA_VALIDATE_FAILED";
         default: return "ESP_FAIL";
     }
+}
+
+// The running slot is deliberately a DIFFERENT partition object from the update slot: a delta reads
+// one while writing the other, and a fake that conflated them would hide a mixed-up pointer.
+static esp_partition_t g_runPart = {"app0", 0x1B0000, 4096};
+
+const esp_partition_t *esp_ota_get_running_partition(void) {
+    g_runPart.size = g_fake.partSize;
+    g_runPart.erase_size = g_fake.sectorSize;
+    return &g_runPart;
+}
+
+esp_err_t esp_partition_read(const esp_partition_t *partition, size_t src_offset, void *dst, size_t size) {
+    if (partition != &g_runPart) return ESP_ERR_INVALID_ARG;
+    if (src_offset + size > g_fake.base.size()) return ESP_ERR_INVALID_SIZE;
+    memcpy(dst, g_fake.base.data() + src_offset, size);
+    g_fake.baseReads.push_back(1);
+    return ESP_OK;
+}
+
+esp_err_t esp_partition_get_sha256(const esp_partition_t *partition, uint8_t *sha_256) {
+    if (partition != &g_runPart) return ESP_ERR_INVALID_ARG;
+    if (g_fake.failBaseSha) return ESP_FAIL;
+    memcpy(sha_256, g_fake.baseSha, 32);
+    return ESP_OK;
 }
 
 const esp_partition_t *esp_ota_get_next_update_partition(const esp_partition_t *) {

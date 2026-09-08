@@ -29,19 +29,29 @@ knowledge in this module that cannot be recovered by reading a spec.
 
 import asyncio
 import hashlib
+import os
 import platform
 import re
+import struct
+import subprocess
+import tempfile
 
 __all__ = [
     "OtaBleError", "find_device", "BleOtaLink", "adapt_link", "usable_chunk",
     "acquire_bluez_mtu",
-    "push_image",
+    "push_image", "query_info",
+    "image_id", "build_tamp_payload", "build_delta_payload", "choose_payload",
+    "image_cache_dir", "cache_image", "cached_image",
+    "TAMP_WINDOW_BITS", "DELTA_MAGIC", "DELTA_HEADER_SIZE",
 ]
 
 # The receiver's own status vocabulary (src/ota_ble.cpp).
 _RE_READY = re.compile(r"OTAB READY\b")
 _RE_CRED = re.compile(r"OTAB CRED (\d+)")
 _RE_PROG = re.compile(r"OTAB PROG (\d+)/(\d+)")
+_RE_INFO = re.compile(r"OTAB INFO run=(\S+) slot=(\d+)")
+_RE_BASE = re.compile(r"OTAB BASE ([0-9a-fA-F]{64}|none)")
+_RE_XFORM = re.compile(r"OTAB XFORM (\S+)")
 
 _MACOS = platform.system() == "Darwin"
 
@@ -374,11 +384,281 @@ class adapt_link(object):
         await self._link.write_fw(data)
 
 
+# ---------------------------------------------------------------- payloads
+#
+# The BLE link is saturated and cannot be made faster: measured on a fugu board
+# 2026-09-08, 384 credit stalls totalling 28.7 s of a ~32 s push against 0.47 s
+# spent inside the host's own write call, i.e. 4 KB per 75 ms == 55 kB/s, which
+# is exactly the air time for one credit window. A bigger MTU, a bigger window
+# and the 2M PHY were all measured and none of them moved it. So the only lever
+# left is to send fewer bytes, which is what these build.
+#
+# Measured on a 1.76 MB ESP32-S3 image, six real build pairs (2026-09-08):
+#
+#   raw     100 %
+#   tamp     69 %        self-contained; the device needs nothing it does not have
+#   delta   4.4-10.3 %   needs the EXACT image the device is running as the base
+#
+# Delta is worth an order of magnitude and is therefore the default whenever the
+# base can be found -- hence the image cache below, which exists solely so that
+# "what is this device running?" has an answer on the next push.
+
+# Must match TAMP_WINDOW_BITS in src/ota_xform.cpp: the device sizes its window
+# buffer at build time and refuses a stream compressed with a larger one. 12 is
+# also the measured optimum (69.0 %, against 70.3 % at w=10 and 71.5 % at w=15).
+TAMP_WINDOW_BITS = 12
+
+# Container the device expects in front of a detools patch. Identical to the one
+# Espressif's esp_delta_ota_patch_gen.py writes, so patches from either tool are
+# interchangeable: magic, the base image's SHA-256, reserved padding to 64 bytes.
+DELTA_MAGIC = 0xFCCDDE10
+DELTA_HEADER_SIZE = 64
+
+
+def image_id(data):
+    """The identity of an ESP32 app image: its own appended SHA-256.
+
+    This is what `esptool image_info` prints as "Validation Hash" and what
+    `esp_partition_get_sha256()` returns on the device, so it is the one value
+    both sides can compute for the SAME image without exchanging the image.
+
+    Returns None when `data` does not carry an appended hash, rather than
+    returning the file's plain sha256 -- a base identity that silently means
+    something different on each side is worse than no base at all.
+    """
+    if len(data) < DELTA_HEADER_SIZE:
+        return None
+    body, appended = data[:-32], data[-32:]
+    if hashlib.sha256(body).digest() != appended:
+        return None
+    return appended.hex()
+
+
+def image_cache_dir():
+    """Where pushed images are kept so a later delta has a base to patch from."""
+    root = os.environ.get("ESP_OTA_BLE_CACHE")
+    if not root:
+        root = os.path.join(os.path.expanduser("~"), ".cache", "esp-ota-ble", "images")
+    return root
+
+
+def cache_image(data):
+    """Store `data` under its image id. Returns the path, or None if unusable.
+
+    Called after a push SUCCEEDS, never before: an image the device rejected is
+    not what it is running, and caching it would hand the next delta a base that
+    does not exist anywhere.
+    """
+    iid = image_id(data)
+    if not iid:
+        return None
+    root = image_cache_dir()
+    try:
+        os.makedirs(root, exist_ok=True)
+        path = os.path.join(root, iid + ".bin")
+        if not os.path.exists(path):
+            # Write-then-rename: a half-written base would produce a patch that
+            # only fails on the device, minutes later, as a corrupt image.
+            fd, tmp = tempfile.mkstemp(dir=root)
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(tmp, path)
+        return path
+    except OSError:
+        return None
+
+
+def cached_image(iid, extra_dirs=()):
+    """Find the image with this id, in the cache or in any of `extra_dirs`.
+
+    `extra_dirs` lets a caller offer its build directories directly, which is
+    what makes the very first delta possible on a device the cache has never
+    seen -- the running image is usually still sitting in a build tree.
+    """
+    if not iid:
+        return None
+    path = os.path.join(image_cache_dir(), iid + ".bin")
+    if os.path.exists(path):
+        return path
+    for d in extra_dirs:
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".bin"):
+                continue
+            cand = os.path.join(d, name)
+            try:
+                with open(cand, "rb") as f:
+                    if image_id(f.read()) == iid:
+                        return cand
+            except OSError:
+                continue
+    return None
+
+
+def build_tamp_payload(data, window=TAMP_WINDOW_BITS):
+    """Compress a whole image with tamp. Raises ImportError without the package."""
+    import tamp
+    return tamp.compress(data, window=window)
+
+
+def build_delta_payload(base_path, data, *, verify=True):
+    """A device-ready delta: the 64-byte container plus a heatshrink patch.
+
+    `verify` re-applies the patch to the base here on the host and checks it
+    reproduces `data` byte for byte. It costs a second and it is not optional in
+    spirit: a patch is applied against flash the host cannot see, and a bad one
+    reconstructs a plausible image that fails only at boot -- on a board whose
+    previous firmware has already been erased.
+    """
+    import detools
+
+    with open(base_path, "rb") as f:
+        base = f.read()
+    base_id = image_id(base)
+    if not base_id:
+        raise OtaBleError("base %s carries no appended SHA-256; it is not an app image" % base_path)
+
+    with tempfile.TemporaryDirectory() as td:
+        new_path = os.path.join(td, "new.bin")
+        patch_path = os.path.join(td, "patch.bin")
+        with open(new_path, "wb") as f:
+            f.write(data)
+        with open(base_path, "rb") as ffrom, open(new_path, "rb") as fto, \
+                open(patch_path, "wb") as fpatch:
+            # heatshrink, and its default window/lookahead: that is the one
+            # configuration the device's bundled detools decoder is built for.
+            detools.create_patch(ffrom, fto, fpatch, compression="heatshrink")
+        with open(patch_path, "rb") as f:
+            patch = f.read()
+
+        if verify:
+            out_path = os.path.join(td, "rebuilt.bin")
+            with open(base_path, "rb") as ffrom, open(patch_path, "rb") as fpatch, \
+                    open(out_path, "wb") as fto:
+                detools.apply_patch(ffrom, fpatch, fto)
+            with open(out_path, "rb") as f:
+                if f.read() != data:
+                    raise OtaBleError("delta patch does not reproduce the image on the host")
+
+    header = struct.pack("<I", DELTA_MAGIC) + bytes.fromhex(base_id)
+    header += b"\x00" * (DELTA_HEADER_SIZE - len(header))
+    return header + patch
+
+
+def choose_payload(data, info, *, prefer="auto", base_dirs=(), on_note=None):
+    """Pick the smallest payload this device can actually accept.
+
+    Returns (xform, payload). `info` is what query_info() returned; passing None
+    (the device never answered) degrades to raw rather than guessing, because
+    every transform depends on something only the device can confirm.
+
+    Falls back rather than failing, and says why through `on_note`: a push that
+    refuses to run because a base image is missing is strictly worse than a
+    slower push that works.
+    """
+    def note(msg):
+        if on_note:
+            on_note(msg)
+
+    supported = set((info or {}).get("xforms") or ())
+    if prefer == "raw":
+        return "raw", data
+
+    want = ("delta", "tamp") if prefer == "auto" else (prefer,)
+
+    for xform in want:
+        if xform == "delta":
+            if "delta" not in supported:
+                note("delta: device does not offer it")
+                continue
+            base_id = (info or {}).get("base")
+            if not base_id:
+                note("delta: device did not report a base digest")
+                continue
+            base_path = cached_image(base_id, base_dirs)
+            if not base_path:
+                note("delta: no local copy of the running image %s..." % base_id[:12])
+                continue
+            try:
+                payload = build_delta_payload(base_path, data)
+            except ImportError:
+                note("delta: detools not installed")
+                continue
+            except OtaBleError as exc:
+                note("delta: %s" % exc)
+                continue
+            note("delta against %s" % os.path.basename(base_path))
+            return "delta", payload
+
+        if xform == "tamp":
+            if "tamp" not in supported:
+                note("tamp: device does not offer it")
+                continue
+            try:
+                payload = build_tamp_payload(data)
+            except ImportError:
+                note("tamp: the tamp package is not installed")
+                continue
+            return "tamp", payload
+
+    if prefer not in ("auto", "raw"):
+        raise OtaBleError("transform %r unavailable and no fallback was requested" % prefer)
+    return "raw", data
+
+
+async def query_info(link, *, cmd_prefix="", timeout=15.0):
+    """Ask the device what it is running and what payloads it accepts.
+
+    Returns {"run", "slot", "base", "xforms"}, or None on an old receiver that
+    does not know the command -- which is not an error, it just means raw.
+    """
+    got = {}
+    seen = asyncio.Event()
+
+    def handle(line):
+        m = _RE_INFO.search(line)
+        if m:
+            got["run"], got["slot"] = m.group(1), int(m.group(2))
+        m = _RE_BASE.search(line)
+        if m:
+            got["base"] = None if m.group(1) == "none" else m.group(1).lower()
+        m = _RE_XFORM.search(line)
+        if m:
+            got["xforms"] = tuple(m.group(1).split(","))
+            seen.set()
+        if "OTAB FAIL" in line:
+            seen.set()
+
+    link.set_line_handler(handle)
+    try:
+        await link.write_cmd("%sinfo" % cmd_prefix)
+        await asyncio.wait_for(seen.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        return None
+    finally:
+        # Leaving it installed would let this closure keep eating the lines the
+        # caller's own handler is about to be waiting for.
+        link.set_line_handler(None)
+    # XFORM is emitted last, so its absence means the reply never completed.
+    return got if "xforms" in got else None
+
+
 async def push_image(link, data, *, sha=None, cmd_prefix="", on_line=None,
-                     on_progress=None,
+                     on_progress=None, xform=None, out_size=None,
                      ready_timeout=60.0, credit_timeout=20.0,
                      credit_retries=3, flush_timeout=60.0, pace_s=0.0):
     """Run `begin`/stream/`end` against an already-open link.
+
+    `data` is always the WIRE payload -- the bytes that cross the link -- and
+    every number in this function (size, digest, credit, progress) is about
+    those bytes and nothing else. With `xform` set to "tamp" or "delta", that
+    payload is no longer the image, so `out_size` must give the size of the
+    image it reconstructs to; the device needs it to erase the right amount of
+    flash up front and to check the result is the length it was promised. Use
+    choose_payload() to build the pair.
 
     Returns True if the device accepted the image, WHICH IS NOT THE SAME as the
     new image running - see the note at the `end` write. Every caller needs its
@@ -421,7 +701,14 @@ async def push_image(link, data, *, sha=None, cmd_prefix="", on_line=None,
 
     link.set_line_handler(handle)
 
-    await link.write_cmd("%sbegin %d %s" % (cmd_prefix, total, sha))
+    if xform and xform != "raw":
+        if not out_size:
+            raise OtaBleError("xform %r needs out_size (the reconstructed image size)" % xform)
+        await link.write_cmd("%sbegin %d %s %s %d" % (cmd_prefix, total, sha, xform, out_size))
+    else:
+        # Byte-for-byte the original two-argument command, so a receiver that
+        # predates transforms sees nothing new.
+        await link.write_cmd("%sbegin %d %s" % (cmd_prefix, total, sha))
     # The wait is for a partition erase, not for a round trip.
     waits = [asyncio.create_task(ready.wait()),
              asyncio.create_task(done.wait()),

@@ -41,7 +41,14 @@ enum class OtaBleSubmit {
 /// Install the host hooks. Call once before any other entry point.
 void otaBleInit(const OtaBleHooks &hooks);
 
-/// Parse and latch one control line: "begin <size> <sha256hex>" | "end" | "abort".
+/// Parse and latch one control line:
+///   "begin <wireSize> <wireSha256hex>"                    -- a raw image, the original protocol
+///   "begin <wireSize> <wireSha256hex> <xform> <imgSize>"  -- xform is "raw" | "tamp" | "delta"
+///   "info" | "end" | "abort"
+/// The size and digest always describe the bytes that go over the WIRE, so credit, progress and
+/// transfer integrity mean the same thing under every transform; <imgSize> is the image those bytes
+/// reconstruct to. "info" answers with OTAB INFO / BASE / XFORM: the running slot, the SHA-256 a
+/// delta must patch from, and the transforms this build can accept.
 /// Safe from any task. Everything checkable without touching flash is checked here and reported
 /// synchronously, so a consumer's command layer can fail the command instead of reporting success
 /// and then failing asynchronously. Execution happens on the next otaBleTick().
@@ -65,6 +72,8 @@ void otaBleRequestAbort();
 
 // Direct entry points. otaBleSubmitCommand() is the normal way in; these are exposed for a consumer
 // that is already on the consumer task and wants to skip the latch. All three must run there.
-bool otaBleBegin(uint32_t size, const char *sha256hex);
+/// `xformName` nullptr or "raw" keeps the classic behaviour; `outSize` is ignored for raw.
+bool otaBleBegin(uint32_t size, const char *sha256hex, const char *xformName = nullptr,
+                 uint32_t outSize = 0);
 bool otaBleEnd(); ///< on success this reboots and does not return
 void otaBleAbort();

@@ -30,6 +30,12 @@ struct FakeOta {
     bool aborted = false;
     const esp_partition_t *bootPart = nullptr;
     int liveAllocs = 0;             ///< heap_caps_malloc minus heap_caps_free
+
+    // --- the running partition, i.e. the base a delta patches from ---
+    std::vector<uint8_t> base;      ///< contents esp_partition_read serves
+    uint8_t baseSha[32] = {0};      ///< what esp_partition_get_sha256 reports for it
+    bool failBaseSha = false;
+    std::vector<uint8_t> baseReads; ///< offsets read, so a test can see the source was consulted
 };
 
 extern FakeOta g_fake;

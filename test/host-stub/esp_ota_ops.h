@@ -10,6 +10,7 @@
 typedef uint32_t esp_ota_handle_t;
 
 const esp_partition_t *esp_ota_get_next_update_partition(const esp_partition_t *start_from);
+const esp_partition_t *esp_ota_get_running_partition(void);
 esp_err_t esp_ota_begin(const esp_partition_t *partition, size_t image_size, esp_ota_handle_t *out_handle);
 esp_err_t esp_ota_write(esp_ota_handle_t handle, const void *data, size_t size);
 esp_err_t esp_ota_end(esp_ota_handle_t handle);
