@@ -158,3 +158,54 @@ in the background instead of all at once up front; that would put the floor near
 Below that sits the 8.6 s of flash writing, which nothing avoids while the full image
 has to be written — and sector-level skipping does not help, because 403 of 433 4 KB
 sectors differ between two real builds (93 %), code having shifted underneath.
+
+## Follow-up 2: erase-ahead, and the limit of this design
+
+Two changes, aimed at the two non-transfer items in the 21 s breakdown.
+
+**Erase ahead of the writer.** `esp_ota_begin` erased the whole 1828 KB slot before
+the first byte could arrive — 6.2 s of dead time. Erasing only a head block and
+keeping the rest erased just ahead of the write pointer brings **READY down from 6.2 s
+to 0.40 s**. It works because `esp_ota_begin` sets `need_erase` only for
+`OTA_WITH_SEQUENTIAL_WRITES` and `esp_ota_write` never bounds anything against the size
+passed to `begin`, so a small size buys a small erase *and* leaves the erasing to us.
+
+It is not free, and the reason is worth keeping: **erase and write serialise on one
+flash die**, so overlapping them cannot save write time — the only thing erase-ahead
+can recover is *link* time. Worse, a 64 KB block erase (~215 ms) blocks the same
+consumer task that drains the staging ring; at ~47 kB/s the host delivers ~10 KB in
+that window, more than the 8 KB ring holds, so the link stalls.
+
+| | before | after |
+|---|---|---|
+| delta, total wall | 21.23 s | **19.80 s**, repeated 19.37 s |
+| delta, begin → READY | 6.2 s | **0.40 s** |
+| raw, transfer | 32.8 s | 35.1–36.8 s |
+
+So it is enabled only when the payload is under a quarter of the image — a wide margin
+between the two regimes seen (5 % against 69 %/100 %). **Honest limit:** raw transfers
+ranged 30.8–37.4 s across the day, so single runs cannot resolve a few seconds there;
+the raw column is not a conclusion. The delta result is outside that noise and repeated.
+
+**Faster return.** `verify()` slept 2 s before each of 20 scans, costing at least 2 s
+even when the board was already back. It now settles 0.3 s and scans continuously.
+
+### A scheduling bug the speedups exposed
+
+The PENDING_VERIFY retry was 3 attempts 8 s apart. Starting ~3 s after a reboot, those
+land at 3 s, 11 s and 19 s of uptime — **missing the 20 s gate by 0.6 s** and failing
+the push. Confirmed in a log showing all three attempts. It is now bounded by time
+rather than attempt count, because the window is a fixed property of the device.
+
+### Where this design stops
+
+    ~2 s   host: scan, connect, info
+     6.2 s device: erase   ]  serialised on one die: 14.7 s of flash work
+     8.5 s device: write   ]  that no codec and no overlap can remove
+    ~1 s   host: reboot + re-advertise
+
+A delta push is now ~19.5 s against a ~15 s floor of pure flash work. Getting below it
+means writing fewer bytes to flash, and that door is closed: **403 of 433 4 KB sectors
+differ** between two real builds (93 %), because code shifts. Flash write throughput is
+190–205 kB/s regardless of chunk size (raw writes 244 B at a time, delta writes ~47 KB
+at a time, and they land within 8 % of each other), so batching does not help either.
