@@ -166,6 +166,13 @@ async def acquire_bluez_mtu(client):
     return client.mtu_size > _ATT_DEFAULT_MTU
 
 
+# After a match appears, keep listening this long before committing, purely so two
+# devices matching the same prefix are still reported as ambiguous rather than silently
+# picking one. The ambiguity check is the reason this function exists rather than
+# bleak's own find_device_by_name.
+SCAN_SETTLE = 0.5
+
+
 async def find_device(name_prefix=None, address=None, service_uuid=None,
                       timeout=8.0):
     """One matching BLEDevice, or None.
@@ -175,6 +182,14 @@ async def find_device(name_prefix=None, address=None, service_uuid=None,
     or scan response is invisible to a name match — a central cannot read the
     GAP name without connecting first — so a device that "cannot be found"
     while it is demonstrably advertising is usually that, not a closed window.
+
+    `timeout` is a BOUND on the scan, not its duration: the scan stops as soon as
+    something matches (plus SCAN_SETTLE). `BleakScanner.discover()`, which this used
+    to call, always sleeps out its whole timeout — measured 2026-09-08, a fugu board
+    is first seen 0.31/0.36/0.94 s into a scan, so every push spent the rest of the
+    window on nothing. The bound still governs the FAILURE case, so callers holding a
+    time-limited resource across the scan (o2p_ble_push.py holds the node's RS-485 bus
+    claim) keep their fail-fast behaviour; that is why the default stays at 8 s.
     """
     from bleak import BleakScanner
 
@@ -184,18 +199,45 @@ async def find_device(name_prefix=None, address=None, service_uuid=None,
             raise OtaBleError("no BLE device at address %s" % address)
         return dev
 
-    items = await BleakScanner.discover(timeout=timeout, return_adv=True)
-    hits = []
-    for dev, adv in items.values():
-        name = dev.name or adv.local_name or ""
-        if name_prefix and not name.startswith(name_prefix):
-            continue
+    # Match against BOTH names. CoreBluetooth frequently omits the advertised
+    # local_name and sets only the cached d.name, and can also serve a stale d.name
+    # alongside a current local_name, so neither alone is reliable.
+    def _names(dev, adv):
+        return [n for n in ((dev.name or ""), (adv.local_name or "")) if n]
+
+    def _matches(dev, adv):
+        if not (name_prefix or service_uuid):
+            return False
+        if name_prefix and not any(n.startswith(name_prefix) for n in _names(dev, adv)):
+            return False
         if service_uuid:
             uuids = [u.lower() for u in (adv.service_uuids or [])]
             if service_uuid.lower() not in uuids:
-                continue
+                return False
+        return True
+
+    seen, found = {}, asyncio.Event()
+
+    def on_seen(dev, adv):
+        seen[dev.address] = (dev, adv)
+        if _matches(dev, adv):
+            found.set()
+
+    scanner = BleakScanner(detection_callback=on_seen)
+    await scanner.start()
+    try:
         if name_prefix or service_uuid:
-            hits.append(dev)
+            await asyncio.wait_for(found.wait(), timeout=timeout)
+            await asyncio.sleep(SCAN_SETTLE)
+        else:
+            # Nothing to match, so nothing can end this early.
+            await asyncio.sleep(timeout)
+    except asyncio.TimeoutError:
+        pass  # nothing matched; fall through and report it below
+    finally:
+        await scanner.stop()
+
+    hits = [dev for dev, adv in seen.values() if _matches(dev, adv)]
     if len(hits) > 1:
         raise OtaBleError(
             "several devices match (%s) — pass an address or a longer name"
