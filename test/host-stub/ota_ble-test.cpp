@@ -83,6 +83,7 @@ static void end_case() {
     CHECK(!otaBleActive(), "session still active at end of case");
     CHECK(g_fake.liveAllocs == 0, "staging ring leaked (%d live allocs)", g_fake.liveAllocs);
     CHECK(g_fake.liveOtaOps == 0, "leaked %d IDF OTA operation(s)", g_fake.liveOtaOps);
+    CHECK(!g_fake.wroteUnerased, "wrote into flash that was never erased");
     // Any FAIL the module reports must be visible at a severity a log filter will not swallow.
     for (auto &s : g_status)
         if (s.line.find("OTAB FAIL") != std::string::npos)
@@ -198,6 +199,40 @@ static void test_happy_path() {
     end_case();
 }
 
+#if defined(CONFIG_SPI_FLASH_YIELD_DURING_ERASE) && !defined(CONFIG_ESP_TASK_WDT_PANIC)
+static void test_erase_ahead() {
+    // A delta-shaped push: a small payload reconstructing a much larger image, which is the only
+    // shape that selects erase-ahead. Erasing 6.2 s of slot up front is dead time; here begin must
+    // erase only a head block and the rest must follow the writer. end_case() separately asserts
+    // that nothing was ever written into flash that was not erased first.
+    begin_case("erase ahead of the writer");
+    auto patch = makeImage(20000);
+    auto wire = deltaWire(g_fake.baseSha, patch);
+    const uint32_t outSize = 300000; // >> 4x the wire, so erase-ahead is chosen
+    otaBleSubmitCommand(beginCmdX(wire, "delta", outSize).c_str());
+    otaBleTick(0);
+    CHECK(g_fake.eraseBytesInBegin <= 64 * 1024,
+          "begin erased %zu bytes up front; the point is to erase only a head block",
+          g_fake.eraseBytesInBegin);
+
+    // Idle ticks are where the erase is supposed to happen: the link is mid-flight, nothing is
+    // staged, and the flash is free. Each one must move the erase forward.
+    const int afterBegin = g_fake.eraseRangeCalls;
+    otaBleTick(0);
+    otaBleTick(0);
+    CHECK(g_fake.eraseRangeCalls > afterBegin,
+          "idle ticks erased nothing; the erase cannot hide behind link time");
+
+    pushAll(wire);
+    CHECK(g_fake.flashed == patch, "erase-ahead corrupted the reconstructed bytes");
+    // Enough must be erased to cover everything written, and the head block alone is not enough.
+    CHECK(g_fake.eraseRangeBytes > 0, "nothing was erased ahead of the writer");
+    otaBleSubmitCommand("abort"); // deliberately short of the declared image size
+    otaBleTick(0);
+    end_case();
+}
+
+#else
 static void test_erase_granularity() {
     // The point of OTA_WITH_SEQUENTIAL_WRITES: nothing may be erased inside begin, or the call blocks
     // for seconds on a real 1.7 MB slot and trips a panic-on-timeout task watchdog.
@@ -214,6 +249,7 @@ static void test_erase_granularity() {
     otaBleTick(0);
     end_case();
 }
+#endif
 
 static void test_truncated() {
     begin_case("truncated image");
@@ -867,7 +903,11 @@ static void test_begin_rejects_trailing_garbage() {
 int main() {
     printf("ota_ble host tests\n");
     test_happy_path();
+#if defined(CONFIG_SPI_FLASH_YIELD_DURING_ERASE) && !defined(CONFIG_ESP_TASK_WDT_PANIC)
+    test_erase_ahead();
+#else
     test_erase_granularity();
+#endif
     test_truncated();
     test_sha_mismatch();
     test_oversized();

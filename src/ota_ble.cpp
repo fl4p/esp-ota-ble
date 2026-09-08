@@ -27,6 +27,24 @@ static constexpr uint32_t CRED_REPEAT_MS = 5000;
 // Matches the 30 s watchdog already used by the node consumer, now a backstop for every transport.
 static constexpr uint32_t STALL_MS = 30000;
 
+// Erase-ahead. Erasing the whole 1828 KB slot inside esp_ota_begin costs 6.2 s (measured on flu)
+// during which nothing else happens -- it is 30 % of a delta push and it is pure dead time, because
+// the flash is idle again for the 8.5 s of writing that follows. Erase only a head block up front
+// and keep the rest erased just ahead of the write pointer, so the erase hides underneath the
+// writes instead of preceding them.
+//
+// The mechanism is a quirk worth stating plainly: esp_ota_begin sets need_erase ONLY for
+// OTA_WITH_SEQUENTIAL_WRITES, and esp_ota_write never bounds anything against the size passed to
+// begin (esp_ota_ops.c:170-199, :175-186). So passing a small size buys a small erase AND
+// need_erase == false, after which this module owns every subsequent erase.
+#if defined(CONFIG_SPI_FLASH_YIELD_DURING_ERASE) && !defined(CONFIG_ESP_TASK_WDT_PANIC)
+static constexpr uint32_t ERASE_HEAD = 64 * 1024;  // erased inside begin; one block erase
+#endif
+static constexpr uint32_t ERASE_CHUNK = 64 * 1024; // 64 KB at a time -> block erases, not 16 sectors
+// Stay this far ahead of the write pointer. One chunk is enough: a chunk erase (~215 ms) buys
+// 64 KB of writing (~310 ms at the measured 206 kB/s), so the writer never catches up.
+static constexpr uint32_t ERASE_LEAD = ERASE_CHUNK;
+
 static uint8_t *ring = nullptr;
 static size_t rHead = 0, rTail = 0, rCount = 0;   // byte ring indices + fill level
 // Also serialises active/failed with freeRing(): the producer's locked recheck must finish before
@@ -52,6 +70,8 @@ static bool failed = false;
 static volatile bool abortReq = false; // set from any task; consumed by the consumer tick
 static uint32_t expectedSize = 0;
 static uint32_t written = 0;    // wire bytes consumed by the transform (consumer)
+static uint32_t erasedTo = 0;   // bytes of the slot erased so far (consumer only)
+static uint32_t eraseTarget = 0; // how much of the slot this image needs erased; 0 = erase-ahead off
 // Consumer-only timing of the flash drain. esp_ota_write() with OTA_WITH_SEQUENTIAL_WRITES erases
 // each 4 KB sector as it first crosses it, so its cost is bimodal: a plain page program, or a
 // program plus a sector erase. Reported once at OTAB OK so a host can attribute a slow transfer to
@@ -60,6 +80,8 @@ static uint64_t wrUs = 0;       // total time inside esp_ota_write
 static uint32_t wrCalls = 0;
 static uint32_t wrSlowCalls = 0; // calls >5 ms -- the erase signature
 static uint32_t wrMaxUs = 0;
+static uint32_t erUs = 0;       // time spent erasing ahead of the write pointer
+static uint32_t erCalls = 0;
 static uint32_t staged = 0;     // accepted from the producer; sampled by the stall watchdog
 static uint32_t lastGranted = 0;
 static uint32_t lastProg = 0;
@@ -82,6 +104,8 @@ static OtaXform pendXform = OtaXform::Raw;
 static uint8_t pendSha[32];
 static std::mutex cmdMutex;
 
+static esp_err_t eraseAhead(uint32_t needTo); // defined below, beside the drain it paces
+
 /// Transform sink: reconstructed image bytes on their way to the passive partition.
 /// A failure here is flash refusing the write; a failure anywhere else under otaXformFeed is the
 /// payload failing to reconstruct. The two send a host to completely different places -- a bad slot
@@ -89,6 +113,11 @@ static std::mutex cmdMutex;
 static bool sinkFailed = false;
 
 static esp_err_t xformSink(const uint8_t *data, size_t len, void *) {
+    // Erase must lead the write pointer. This is where the image write offset is actually known --
+    // a transform decides how many image bytes one wire slice becomes, and for delta that is tens
+    // of KB, so bounding the wire slice instead would not bound this.
+    const esp_err_t eerr = eraseAhead(imageWritten + (uint32_t) len + ERASE_LEAD);
+    if (eerr != ESP_OK) { sinkFailed = true; return eerr; }
     const esp_err_t err = esp_ota_write(otaHandle, data, len);
     if (err != ESP_OK) { sinkFailed = true; return err; }
     imageWritten += (uint32_t) len;
@@ -234,8 +263,40 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, ui
     // erase I/O failure leaves a live operation that only esp_ota_abort releases. Its earlier
     // returns never touch *out_handle, which is what makes the zero a reliable discriminator.
     otaHandle = 0;
+    erasedTo = eraseTarget = 0;
 #if defined(CONFIG_SPI_FLASH_YIELD_DURING_ERASE) && !defined(CONFIG_ESP_TASK_WDT_PANIC)
-    esp_err_t err = esp_ota_begin(otaPart, outSize, &otaHandle);
+    // Which erase strategy, decided by who the bottleneck is going to be.
+    //
+    // Erasing up front costs 6.2 s of dead time before the first byte can arrive. Erasing ahead of
+    // the write pointer instead removes that wait -- READY in 0.40 s rather than 6.2 s, measured --
+    // but it is NOT free: a 64 KB block erase takes ~215 ms and blocks the same consumer task that
+    // drains the staging ring. At the link's ~47 kB/s the host delivers ~10 KB in that time, more
+    // than the 8 KB ring holds, so the credit window empties and the LINK stalls.
+    //
+    // Measured on flu 2026-09-08, and the two cases point opposite ways:
+    //   delta, wire 5 % of the image:  total   21.2 s -> 19.8 s   (win: host was never the limit)
+    //   raw,   wire 100 %:             transfer 32.8 s -> 36.8 s  (loss: every pause stalls the link)
+    // Erase and write serialise on one flash die, so overlapping them cannot save write time; the
+    // only thing erase-ahead can recover is LINK time, and only a payload far smaller than the
+    // image leaves the device with idle moments to spend erasing. A quarter is a wide margin
+    // between the two regimes seen here (5 % and 69 %/100 %).
+    const bool eraseAheadPays = (uint64_t) size * 4 < (uint64_t) outSize;
+    const uint32_t esz = (uint32_t) otaPart->erase_size;
+    esp_err_t err;
+    if (eraseAheadPays) {
+        // ALIGN_UP by hand: esp_ota_begin erases ALIGN_UP(size, erase_size) and we must know
+        // exactly how much that was, because everything past it is ours to erase.
+        const uint32_t head = outSize < ERASE_HEAD ? outSize : ERASE_HEAD;
+        err = esp_ota_begin(otaPart, head, &otaHandle);
+        if (err == ESP_OK) {
+            erasedTo = ((head + esz - 1) / esz) * esz;
+            eraseTarget = ((outSize + esz - 1) / esz) * esz;
+            if (eraseTarget > otaPart->size) eraseTarget = (uint32_t) otaPart->size;
+            if (erasedTo > eraseTarget) erasedTo = eraseTarget;
+        }
+    } else {
+        err = esp_ota_begin(otaPart, outSize, &otaHandle); // erase it all now; eraseTarget stays 0
+    }
 #else
     esp_err_t err = esp_ota_begin(otaPart, OTA_WITH_SEQUENTIAL_WRITES, &otaHandle);
 #endif
@@ -285,6 +346,7 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, ui
     written = staged = lastGranted = lastProg = 0;
     sinkFailed = false;
     wrUs = 0; wrCalls = wrSlowCalls = wrMaxUs = 0;
+    erUs = erCalls = 0;
     failed = false;
     abortReq = false; // an abort aimed at a previous session must not poison this one
     creditRepeatArmed = false;
@@ -361,6 +423,25 @@ static bool abortIfStalled(uint32_t nowMs) {
     return true;
 }
 
+/// Consumer only. Erase forward until `needTo` bytes of the slot are ready, one chunk at a time so
+/// each call stays short enough to keep the BLE host task alive. Returns false on a flash error.
+/// A no-op unless the up-front-erase strategy handed us the job (eraseTarget != 0).
+static esp_err_t eraseAhead(uint32_t needTo) {
+    if (!eraseTarget) return ESP_OK; // sequential-write strategy: esp_ota_write owns the erasing
+    if (needTo > eraseTarget) needTo = eraseTarget;
+    while (erasedTo < needTo) {
+        uint32_t n = eraseTarget - erasedTo;
+        if (n > ERASE_CHUNK) n = ERASE_CHUNK;
+        const int64_t t0 = esp_timer_get_time();
+        const esp_err_t err = esp_partition_erase_range(otaPart, erasedTo, n);
+        erUs += (uint32_t) (esp_timer_get_time() - t0);
+        erCalls++;
+        if (err != ESP_OK) return err; // the caller's write path reports and tears down
+        erasedTo += n;
+    }
+    return ESP_OK;
+}
+
 /// Consumer only. Move everything staged to flash. Returns false if a write failed (session aborted).
 static bool drainRing() {
     static uint8_t slice[FLUSH_SLICE];
@@ -405,9 +486,9 @@ static bool drainRing() {
             lastProg = written;
             emit(OtaBleLevel::Info, "OTAB PROG %u/%u", (unsigned) written, (unsigned) expectedSize);
             if (written == expectedSize) {
-                emit(OtaBleLevel::Info, "OTAB STAT write_ms=%u calls=%u slow=%u max_ms=%u out=%u",
+                emit(OtaBleLevel::Info, "OTAB STAT write_ms=%u calls=%u erase_ms=%u out=%u",
                      (unsigned) (wrUs / 1000), (unsigned) wrCalls,
-                     (unsigned) wrSlowCalls, (unsigned) (wrMaxUs / 1000), (unsigned) imageWritten);
+                     (unsigned) (erUs / 1000), (unsigned) imageWritten);
             }
         }
         grantCredit();
@@ -456,6 +537,20 @@ void otaBleTick(uint32_t nowMs) {
     if (abortReq) { otaBleAbort(); return; } // disconnect/abort requested off the consumer task
     if (abortIfStalled(nowMs)) return;
     if (!drainRing()) return;
+    // Idle tick: nothing staged, so the flash is free and the link is mid-flight. This is where
+    // the erase actually gets hidden -- on a raw or tamp push there are ~15-24 s of link time to
+    // bury all 6.2 s of it in. On a delta push there is almost none, which is why delta gains
+    // ~0.2 s here and not more: erase and write serialise on one die.
+    bool idle;
+    { std::lock_guard<std::mutex> lk(ringMutex); idle = rCount == 0; }
+    if (idle && eraseTarget && erasedTo < eraseTarget) {
+        const esp_err_t err = eraseAhead(erasedTo + ERASE_CHUNK);
+        if (err != ESP_OK) {
+            emit(OtaBleLevel::Error, "OTAB FAIL erase %s", esp_err_to_name(err));
+            otaBleAbort();
+            return;
+        }
+    }
     repeatCredit(nowMs);
 }
 

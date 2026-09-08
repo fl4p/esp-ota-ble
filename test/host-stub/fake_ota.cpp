@@ -70,6 +70,29 @@ esp_err_t esp_partition_read(const esp_partition_t *partition, size_t src_offset
     return ESP_OK;
 }
 
+static void markErased(size_t offset, size_t size) {
+    const size_t sec = g_fake.sectorSize;
+    if (g_fake.erasedSectors.size() < g_fake.partSize / sec) {
+        g_fake.erasedSectors.assign(g_fake.partSize / sec, false);
+    }
+    for (size_t o = offset; o < offset + size; o += sec) {
+        const size_t i = o / sec;
+        if (i < g_fake.erasedSectors.size()) g_fake.erasedSectors[i] = true;
+    }
+}
+
+esp_err_t esp_partition_erase_range(const esp_partition_t *partition, size_t offset, size_t size) {
+    if (partition != &g_part) return ESP_ERR_INVALID_ARG;
+    // Real flash refuses a misaligned range outright; a fake that accepted one would hide exactly
+    // the kind of arithmetic slip erase-ahead can make.
+    if (offset % g_fake.sectorSize || size % g_fake.sectorSize) return ESP_ERR_INVALID_ARG;
+    if (offset + size > g_fake.partSize) return ESP_ERR_INVALID_SIZE;
+    ++g_fake.eraseRangeCalls;
+    g_fake.eraseRangeBytes += size;
+    markErased(offset, size);
+    return ESP_OK;
+}
+
 esp_err_t esp_partition_get_sha256(const esp_partition_t *partition, uint8_t *sha_256) {
     if (partition != &g_runPart) return ESP_ERR_INVALID_ARG;
     if (g_fake.failBaseSha) return ESP_FAIL;
@@ -107,6 +130,7 @@ esp_err_t esp_ota_begin(const esp_partition_t *partition, size_t image_size, esp
                         partition->erase_size;
         }
         g_fake.eraseBytesInBegin += eraseSize;
+        markErased(0, eraseSize > g_fake.partSize ? g_fake.partSize : eraseSize);
     }
     g_wroteSize = 0;
     return ESP_OK;
@@ -124,6 +148,16 @@ esp_err_t esp_ota_write(esp_ota_handle_t, const void *data, size_t size) {
         if (bytes) {
             ++g_fake.eraseCallsInWrite;
             g_fake.eraseBytesInWrite += bytes;
+            markErased(first * sec, ((last - first) + 1) * sec);
+        }
+    } else {
+        // need_erase == false means SOMEBODY ELSE promised these sectors were erased. Check it.
+        for (size_t o = g_wroteSize; o < g_wroteSize + size; o += g_fake.sectorSize) {
+            const size_t i = o / g_fake.sectorSize;
+            if (i >= g_fake.erasedSectors.size() || !g_fake.erasedSectors[i]) {
+                g_fake.wroteUnerased = true;
+                break;
+            }
         }
     }
     const uint8_t *p = (const uint8_t *) data;

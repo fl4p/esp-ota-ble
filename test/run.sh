@@ -26,12 +26,22 @@ else
     echo "tamp: not found -- Tamp transform tests will be skipped (set TAMP_DIR to enable)"
 fi
 
-${CXX:-clang++} -std=gnu++17 -Wall -Wextra -g -fsanitize=address,undefined \
-    -I test/host-stub -I src $tamp_inc \
-    -x c++ $tamp_srcs \
-    -x c++ \
-    -o "$out" \
-    test/host-stub/ota_ble-test.cpp test/host-stub/fake_ota.cpp test/host-stub/sha256.cpp \
-    test/host-stub/fake_delta_ota.cpp \
-    src/ota_ble.cpp src/ota_xform.cpp
-exec "$out"
+# Both erase strategies, because they are different code and the receiver picks between them on
+# Kconfig it cannot see from here. Without the second pass the erase-ahead path -- the one that
+# owns erasing, and can therefore write into flash nobody erased -- would never be compiled.
+run_suite() {
+    label="$1"; shift
+    ${CXX:-clang++} -std=gnu++17 -Wall -Wextra -g -fsanitize=address,undefined \
+        -I test/host-stub -I src $tamp_inc "$@" \
+        -x c++ $tamp_srcs \
+        -x c++ \
+        -o "$out" \
+        test/host-stub/ota_ble-test.cpp test/host-stub/fake_ota.cpp test/host-stub/sha256.cpp \
+        test/host-stub/fake_delta_ota.cpp \
+        src/ota_ble.cpp src/ota_xform.cpp
+    echo "--- $label"
+    "$out"
+}
+
+run_suite "erase strategy: sequential writes"
+run_suite "erase strategy: erase-ahead" -DCONFIG_SPI_FLASH_YIELD_DURING_ERASE

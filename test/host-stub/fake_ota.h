@@ -26,6 +26,13 @@ struct FakeOta {
     // --- observations ---
     int beginCalls = 0;
     int liveOtaOps = 0;             ///< esp_ota_begin minus end/abort
+    // Erase bookkeeping. The receiver now owns most of the erasing, so the fake has to police the
+    // invariant that used to be ESP-IDF's job: nothing may be written to flash that was not erased
+    // first. Without this a bug in erase-ahead would produce a passing test and a corrupt image.
+    std::vector<bool> erasedSectors;
+    bool wroteUnerased = false;     ///< set if esp_ota_write touched an un-erased sector
+    int eraseRangeCalls = 0;        ///< explicit esp_partition_erase_range calls (erase-ahead)
+    size_t eraseRangeBytes = 0;
     size_t eraseBytesInBegin = 0;   ///< bytes erased synchronously inside esp_ota_begin
     int eraseCallsInWrite = 0;      ///< number of incremental erases performed during writes
     size_t eraseBytesInWrite = 0;
