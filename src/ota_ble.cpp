@@ -8,6 +8,7 @@
 
 #include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
+#include <esp_timer.h>
 #include <esp_partition.h>
 #include <esp_system.h>
 #include <mbedtls/sha256.h>
@@ -41,6 +42,14 @@ static bool failed = false;
 static volatile bool abortReq = false; // set from any task; consumed by the consumer tick
 static uint32_t expectedSize = 0;
 static uint32_t written = 0;    // flushed to flash (consumer)
+// Consumer-only timing of the flash drain. esp_ota_write() with OTA_WITH_SEQUENTIAL_WRITES erases
+// each 4 KB sector as it first crosses it, so its cost is bimodal: a plain page program, or a
+// program plus a sector erase. Reported once at OTAB OK so a host can attribute a slow transfer to
+// erase rather than to the link. Never used for control flow.
+static uint64_t wrUs = 0;       // total time inside esp_ota_write
+static uint32_t wrCalls = 0;
+static uint32_t wrSlowCalls = 0; // calls >5 ms -- the erase signature
+static uint32_t wrMaxUs = 0;
 static uint32_t staged = 0;     // accepted from the producer; sampled by the stall watchdog
 static uint32_t lastGranted = 0;
 static uint32_t lastProg = 0;
@@ -137,13 +146,24 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32]) {
     memcpy(expectedSha, sha, 32);
     quiesce(true); // free the CPU/flash for the erase + writes before anything touches the partition
 
-    // OTA_WITH_SEQUENTIAL_WRITES, *not* OTA_SIZE_UNKNOWN. The two constants read alike and behave
-    // oppositely: a byte size or OTA_SIZE_UNKNOWN makes esp_ota_begin erase synchronously right here
-    // (and OTA_SIZE_UNKNOWN erases the WHOLE partition, worse than passing the real size), which on a
-    // ~1.7 MB slot blocks long enough to starve the idle task and trip a panic-on-timeout task
-    // watchdog. Only this constant defers erasing to per-sector calls inside esp_ota_write, a few tens
-    // of ms each. It requires strictly sequential write offsets, which the ring's FIFO drain gives us.
+    // Where the transfer time goes. OTA_WITH_SEQUENTIAL_WRITES defers erasing to esp_ota_write,
+    // which then erases every 4 KB sector as the write pointer crosses it -- UNCONDITIONALLY, so
+    // pre-erasing cannot help (esp_ota_ops.c:313-327). Measured on flu 2026-09-08 via OTAB STAT:
+    // 32.4 s of a 43.4 s push was inside esp_ota_write, ~430 sector erases for a 1.76 MB image.
+    // Passing the real size instead erases once, up front, in a single esp_partition_erase_range
+    // that uses 64 KB block erases -- far cheaper per byte than 430 sector erases.
+    //
+    // That was originally rejected because the erase blocks and could starve the idle task into a
+    // panic-on-timeout watchdog. Both halves of that are config-dependent, so take the fast path
+    // only where they are provably absent: YIELD_DURING_ERASE makes the erase release the CPU
+    // periodically (keeping the BLE task alive and the link up), and without WDT_PANIC a late idle
+    // task logs rather than reboots. A consumer built without those keeps the old, slower, always
+    // safe behaviour. Both modes need strictly sequential offsets, which the ring's FIFO drain gives.
+#if defined(CONFIG_SPI_FLASH_YIELD_DURING_ERASE) && !defined(CONFIG_ESP_TASK_WDT_PANIC)
+    esp_err_t err = esp_ota_begin(otaPart, size, &otaHandle);
+#else
     esp_err_t err = esp_ota_begin(otaPart, OTA_WITH_SEQUENTIAL_WRITES, &otaHandle);
+#endif
     if (err != ESP_OK) {
         emit(OtaBleLevel::Warn, "OTAB FAIL esp_ota_begin %s", esp_err_to_name(err));
         freeRing();
@@ -155,6 +175,7 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32]) {
     rHead = rTail = rCount = 0;
     expectedSize = size;
     written = staged = lastGranted = lastProg = 0;
+    wrUs = 0; wrCalls = wrSlowCalls = wrMaxUs = 0;
     failed = false;
     abortReq = false; // an abort aimed at a previous session must not poison this one
     creditRepeatArmed = false;
@@ -242,7 +263,13 @@ static bool drainRing() {
             rCount -= n;
         }
         // Flash write happens outside the lock so the producer's stage call never blocks on flash I/O.
+        const int64_t t0 = esp_timer_get_time();
         esp_err_t err = esp_ota_write(otaHandle, slice, n);
+        const uint32_t dt = (uint32_t) (esp_timer_get_time() - t0);
+        wrUs += dt;
+        wrCalls++;
+        if (dt > 5000) wrSlowCalls++;
+        if (dt > wrMaxUs) wrMaxUs = dt;
         if (err != ESP_OK) {
             emit(OtaBleLevel::Error, "OTAB FAIL esp_ota_write %s", esp_err_to_name(err));
             { std::lock_guard<std::mutex> lk(ringMutex); failed = true; }
@@ -257,6 +284,11 @@ static bool drainRing() {
         if (written >= lastProg + 64 * 1024 || written == expectedSize) {
             lastProg = written;
             emit(OtaBleLevel::Info, "OTAB PROG %u/%u", (unsigned) written, (unsigned) expectedSize);
+            if (written == expectedSize) {
+                emit(OtaBleLevel::Info, "OTAB STAT write_ms=%u calls=%u slow=%u max_ms=%u",
+                     (unsigned) (wrUs / 1000), (unsigned) wrCalls,
+                     (unsigned) wrSlowCalls, (unsigned) (wrMaxUs / 1000));
+            }
         }
         grantCredit();
     }
