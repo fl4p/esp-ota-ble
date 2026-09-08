@@ -199,6 +199,194 @@ static void test_happy_path() {
     end_case();
 }
 
+#if OTA_BLE_SECTOR_SKIP
+// ------------------------------------------------ skip-identical-sectors
+//
+// The strategy exists because a rebuild changes only part of the image. These cases all run the
+// same shape: put a "previous firmware" in the slot, push a "new firmware", and assert on the SLOT
+// -- not on the write calls -- because the slot is the only thing the bootloader will ever read.
+
+/// The image the slot is preloaded with, and a copy of it with `dirty` whole sectors rewritten.
+static std::vector<uint8_t> variantOf(const std::vector<uint8_t> &img, size_t dirtySectors) {
+    std::vector<uint8_t> v = img;
+    for (size_t k = 0; k < dirtySectors; ++k) {
+        const size_t off = (k * 3 + 1) * 4096; // scattered, not a prefix
+        for (size_t i = off; i < off + 4096 && i < v.size(); ++i) v[i] = (uint8_t) (v[i] ^ 0x5A);
+    }
+    return v;
+}
+
+static void preloadSlot(const std::vector<uint8_t> &img) {
+    g_fake.slot.assign(g_fake.partSize, 0xFF);
+    memcpy(g_fake.slot.data(), img.data(), img.size());
+}
+
+static void test_sector_skip_keeps_identical_sectors() {
+    // 20 sectors of image, 3 of them changed. The whole point is that the other 17 are neither
+    // erased nor programmed, while the slot still ends up holding the new image exactly.
+    begin_case("skip: unchanged sectors are left alone");
+    auto oldImg = makeImage(20 * 4096);
+    auto newImg = variantOf(oldImg, 3);
+    preloadSlot(oldImg);
+
+    otaBleSubmitCommand(beginCmd(newImg).c_str());
+    otaBleTick(0);
+    pushAll(newImg);
+    otaBleSubmitCommand("end");
+    otaBleTick(0);
+
+    CHECK(memcmp(g_fake.slot.data(), newImg.data(), newImg.size()) == 0,
+          "the slot does not hold the new image");
+    CHECK(g_fake.bootPart != nullptr, "boot partition not set");
+    CHECK(!sawLine("OTAB FAIL"), "unexpected FAIL");
+    // 3 dirty sectors + sector 0, which is never skipped. Anything more means the comparison is
+    // not actually deciding anything; anything less means it skipped a sector it had to write.
+    const Status *st = findLine("OTAB SKIP");
+    CHECK(st != nullptr, "no OTAB SKIP line");
+    if (st) {
+        unsigned kept = 0, wrote = 0, erases = 0, ms = 0;
+        CHECK(sscanf(st->line.c_str(), "OTAB SKIP kept=%u wrote=%u erases=%u erase_ms=%u",
+                     &kept, &wrote, &erases, &ms) == 4, "unparsable SKIP line: %s",
+              st->line.c_str());
+        CHECK(wrote == 4, "rewrote %u sectors, expected 4 (3 changed + sector 0)", wrote);
+        CHECK(kept == 16, "kept %u sectors, expected 16", kept);
+        CHECK(erases == wrote, "erased %u sectors for %u writes", erases, wrote);
+    }
+    end_case();
+}
+
+static void test_sector_skip_rewrites_for_one_byte() {
+    // Known-bad calibration: construct the failure the guard exists to catch and watch it fail.
+    // A single differing byte anywhere in a sector must cost that whole sector, because 4 KB is
+    // the smallest thing flash can erase.
+    begin_case("skip: one byte dirties a whole sector");
+    auto oldImg = makeImage(20 * 4096);
+    auto newImg = oldImg;
+    newImg[7 * 4096 + 1234] ^= 0x01;
+    preloadSlot(oldImg);
+
+    otaBleSubmitCommand(beginCmd(newImg).c_str());
+    otaBleTick(0);
+    pushAll(newImg);
+    otaBleSubmitCommand("end");
+    otaBleTick(0);
+
+    CHECK(memcmp(g_fake.slot.data(), newImg.data(), newImg.size()) == 0,
+          "a one-byte change did not reach the slot");
+    const Status *st = findLine("OTAB SKIP");
+    unsigned kept = 0, wrote = 0, erases = 0, ms = 0;
+    if (st) sscanf(st->line.c_str(), "OTAB SKIP kept=%u wrote=%u erases=%u erase_ms=%u",
+                   &kept, &wrote, &erases, &ms);
+    CHECK(wrote == 2, "one changed byte rewrote %u sectors, expected 2 (its own + sector 0)", wrote);
+    end_case();
+}
+
+static void test_sector_skip_unreadable_slot_does_not_skip() {
+    // Guard rule 1: unevaluable input must not read as "already correct". A slot that cannot be
+    // read back has to cost a full rewrite -- the alternative is stale bytes inside an image that
+    // still passes its SHA, because the digest covers the wire payload and never re-reads flash.
+    begin_case("skip: an unreadable slot is never skipped");
+    auto img = makeImage(20 * 4096);
+    preloadSlot(img);
+    g_fake.failSlotReads = true;
+
+    otaBleSubmitCommand(beginCmd(img).c_str());
+    otaBleTick(0);
+    pushAll(img);
+    otaBleSubmitCommand("end");
+    otaBleTick(0);
+
+    const Status *st = findLine("OTAB SKIP");
+    unsigned kept = 1, wrote = 0, erases = 0, ms = 0;
+    if (st) sscanf(st->line.c_str(), "OTAB SKIP kept=%u wrote=%u erases=%u erase_ms=%u",
+                   &kept, &wrote, &erases, &ms);
+    CHECK(kept == 0, "skipped %u sectors it could not read back", kept);
+    CHECK(wrote == 20, "wrote %u of 20 sectors despite every compare failing", wrote);
+    CHECK(g_fake.bootPart != nullptr, "a failed read-back broke the push instead of slowing it");
+    end_case();
+}
+
+static void test_sector_skip_identical_image_still_boots() {
+    // Re-pushing the image the slot already holds is the best case for this strategy and the one
+    // that breaks the IDF contract: esp_ota_end() refuses a handle nothing was written through,
+    // which the fake models. Note what this case does NOT prove -- deleting the "sector 0 is never
+    // skipped" rule leaves it passing, because esp_ota_begin erases sector 0 before the first
+    // comparison reads it. What is pinned here is the OUTCOME (wrote >= 1, and the boot slot
+    // moves), which holds whichever of the two mechanisms is doing the work.
+    begin_case("skip: an identical image still switches the boot slot");
+    auto img = makeImage(20 * 4096);
+    preloadSlot(img);
+
+    otaBleSubmitCommand(beginCmd(img).c_str());
+    otaBleTick(0);
+    pushAll(img);
+    otaBleSubmitCommand("end");
+    otaBleTick(0);
+
+    CHECK(!sawLine("OTAB FAIL"), "identical re-push failed");
+    CHECK(g_fake.bootPart != nullptr, "boot partition not set for an identical image");
+    CHECK(memcmp(g_fake.slot.data(), img.data(), img.size()) == 0, "slot no longer holds the image");
+    const Status *st = findLine("OTAB SKIP");
+    unsigned kept = 0, wrote = 0, erases = 0, ms = 0;
+    if (st) sscanf(st->line.c_str(), "OTAB SKIP kept=%u wrote=%u erases=%u erase_ms=%u",
+                   &kept, &wrote, &erases, &ms);
+    CHECK(kept == 19 && wrote == 1, "identical image: kept=%u wrote=%u, expected 19/1", kept, wrote);
+    end_case();
+}
+
+static void test_sector_skip_withdrawn_under_encryption() {
+    // The fallback has to be a fallback, not a failure: an encrypted slot loses the optimisation
+    // and keeps the push.
+    begin_case("skip: withdrawn on an encrypted slot");
+    g_fake.encryptionEnabled = true;
+    auto img = makeImage(20000);
+
+    otaBleSubmitCommand(beginCmd(img).c_str());
+    otaBleTick(0);
+    pushAll(img);
+    otaBleSubmitCommand("end");
+    otaBleTick(0);
+
+    CHECK(!sawLine("OTAB SKIP"), "compared sectors on an encrypted slot");
+    CHECK(g_fake.flashed == img, "the fallback did not flash the image");
+    CHECK(g_fake.bootPart != nullptr, "boot partition not set");
+    end_case();
+}
+
+static void test_sector_skip_tail_sector() {
+    // A final partial sector has nothing to compare against until the transform is finished, so it
+    // is committed by otaBleEnd rather than by the sink. Drop that flush and the image is truncated.
+    begin_case("skip: the final partial sector is committed");
+    auto img = makeImage(3 * 4096 + 17);
+    otaBleSubmitCommand(beginCmd(img).c_str());
+    otaBleTick(0);
+    pushAll(img);
+    otaBleSubmitCommand("end");
+    otaBleTick(0);
+    CHECK(memcmp(g_fake.slot.data(), img.data(), img.size()) == 0,
+          "the tail sector never reached the slot");
+    CHECK(!sawLine("OTAB FAIL"), "unexpected FAIL");
+    end_case();
+}
+
+static void test_sector_skip_aborted_push_frees_the_buffer() {
+    // The sector buffer is a second allocation on a board that had barely enough heap for the
+    // first. end_case() checks liveAllocs, so this asserts it is released on the abort path too.
+    begin_case("skip: an aborted push releases the sector buffer");
+    auto img = makeImage(20 * 4096);
+    otaBleSubmitCommand(beginCmd(img).c_str());
+    otaBleTick(0);
+    pushAll(std::vector<uint8_t>(img.begin(), img.begin() + 8192));
+    otaBleSubmitCommand("abort");
+    otaBleTick(0);
+    CHECK(g_fake.bootPart == nullptr, "an aborted push moved the boot partition");
+    end_case();
+}
+#endif // OTA_BLE_SECTOR_SKIP
+
+// Only compiled when skip-identical-sectors is off: it owns the slot instead, and these two cases
+// assert the erase behaviour of the strategies it displaces.
+#if !OTA_BLE_SECTOR_SKIP
 #if defined(CONFIG_SPI_FLASH_YIELD_DURING_ERASE) && !defined(CONFIG_ESP_TASK_WDT_PANIC)
 static void test_erase_ahead() {
     // A delta-shaped push: a small payload reconstructing a much larger image, which is the only
@@ -250,6 +438,7 @@ static void test_erase_granularity() {
     end_case();
 }
 #endif
+#endif // !OTA_BLE_SECTOR_SKIP
 
 static void test_truncated() {
     begin_case("truncated image");
@@ -903,7 +1092,15 @@ static void test_begin_rejects_trailing_garbage() {
 int main() {
     printf("ota_ble host tests\n");
     test_happy_path();
-#if defined(CONFIG_SPI_FLASH_YIELD_DURING_ERASE) && !defined(CONFIG_ESP_TASK_WDT_PANIC)
+#if OTA_BLE_SECTOR_SKIP
+    test_sector_skip_keeps_identical_sectors();
+    test_sector_skip_rewrites_for_one_byte();
+    test_sector_skip_unreadable_slot_does_not_skip();
+    test_sector_skip_identical_image_still_boots();
+    test_sector_skip_withdrawn_under_encryption();
+    test_sector_skip_tail_sector();
+    test_sector_skip_aborted_push_frees_the_buffer();
+#elif defined(CONFIG_SPI_FLASH_YIELD_DURING_ERASE) && !defined(CONFIG_ESP_TASK_WDT_PANIC)
     test_erase_ahead();
 #else
     test_erase_granularity();

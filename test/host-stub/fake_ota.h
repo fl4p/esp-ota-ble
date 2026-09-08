@@ -22,6 +22,7 @@ struct FakeOta {
     bool failEnd = false;
     bool failSetBoot = false;
     bool spiramAvailable = false;   ///< the bench board has none; exercises the malloc fallback
+    bool encryptionEnabled = false; ///< withdraws skip-identical-sectors, without an encrypted board
 
     // --- observations ---
     int beginCalls = 0;
@@ -37,7 +38,15 @@ struct FakeOta {
     int eraseCallsInWrite = 0;      ///< number of incremental erases performed during writes
     size_t eraseBytesInWrite = 0;
     int writeCalls = 0;
-    std::vector<uint8_t> flashed;   ///< everything handed to esp_ota_write, in order
+    std::vector<uint8_t> flashed;   ///< everything handed to a write call, in call order
+    // The UPDATE slot's actual bytes. Modelling only what was handed to a write call was enough
+    // while every byte of the image was written; a receiver that may SKIP a sector is asserted
+    // against what the slot ends up holding, which is the only thing the bootloader ever sees.
+    // Preload it (after fakeOtaReset) to stand for a previous firmware already in the slot;
+    // fakeOtaReset leaves it blank, i.e. 0xFF, which is erased flash.
+    std::vector<uint8_t> slot;
+    int slotReads = 0;              ///< esp_partition_read against the update slot, i.e. compares
+    bool failSlotReads = false;     ///< a slot that cannot be read back: the compare must not skip
     bool ended = false;
     bool aborted = false;
     const esp_partition_t *bootPart = nullptr;

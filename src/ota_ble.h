@@ -22,6 +22,15 @@
 /// the lines a host tool needs to distinguish failure from a dead link.
 enum class OtaBleLevel { Info, Warn, Error };
 
+/// Compare each erase sector against the update slot before erasing it, and program only the
+/// sectors that actually differ. On a rebuild of the same firmware most of the image is unchanged,
+/// so most of the erasing and programming -- which is where a push spends its time -- is skipped.
+/// Set to 0 to fall back to erasing the whole slot (the strategy chosen automatically by build
+/// config); the receiver also withdraws it by itself on an encrypted flash or with no RAM to spare.
+#ifndef OTA_BLE_SECTOR_SKIP
+#define OTA_BLE_SECTOR_SKIP 1
+#endif
+
 struct OtaBleHooks {
     /// Required. Emits one protocol line (no trailing newline) to the transport.
     void (*status)(OtaBleLevel level, const char *line) = nullptr;

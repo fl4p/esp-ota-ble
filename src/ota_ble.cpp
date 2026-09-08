@@ -8,6 +8,7 @@
 #include <mutex>
 
 #include <esp_heap_caps.h>
+#include <esp_flash_encrypt.h>
 #include <esp_ota_ops.h>
 #include <esp_timer.h>
 #include <esp_partition.h>
@@ -44,6 +45,30 @@ static constexpr uint32_t ERASE_CHUNK = 64 * 1024; // 64 KB at a time -> block e
 // Stay this far ahead of the write pointer. One chunk is enough: a chunk erase (~215 ms) buys
 // 64 KB of writing (~310 ms at the measured 206 kB/s), so the writer never catches up.
 static constexpr uint32_t ERASE_LEAD = ERASE_CHUNK;
+
+// Skip-identical-sectors. The dominant cost of a push is flash work, not link time: 32.4 s of a
+// 43.4 s raw push was inside esp_ota_write. But a rebuild of the same firmware does not change most
+// of the image -- with a stable layout (fugu-mppt-firmware doc/2026-09-08-image-layout-stability-
+// for-ota.md) a one-line edit leaves ~2/3 of the 4 KB sectors byte-identical to what the slot
+// already holds. Erasing and reprogramming those is pure waste.
+//
+// So compare before erasing: buffer one sector of the reconstructed image, read the slot back, and
+// erase+program only on a mismatch. A read of 4 KB costs well under a millisecond against ~20 ms to
+// program it and tens of ms to erase it, and the compare bails at the first differing byte, so a
+// dirty sector barely pays for the check.
+//
+// This is exclusive with erase-ahead, and not by preference: erase-ahead erases flash BEFORE the
+// bytes that go there have arrived, which destroys the very content the comparison reads. Only one
+// of the two strategies can own the slot, and skipping is worth more than hiding an erase --
+// erase-ahead only ever recovers link time, while this removes flash work outright.
+//
+// What it costs: one erase-sector buffer of RAM, and the loss of 64 KB block erases (a dirty sector
+// is erased on its own). Whether that trade holds depends on the 4 KB sector-erase time, which is
+// NOT measured on this hardware -- the OTAB STAT line reports erase_ms and erases so the first real
+// push measures it.
+// Slot read-back granularity for the comparison; a mismatch stops the reads. OTA_BLE_SECTOR_SKIP
+// (ota_ble.h) turns the whole strategy off at build time.
+static constexpr size_t CMP_WINDOW = 256;
 
 static uint8_t *ring = nullptr;
 static size_t rHead = 0, rTail = 0, rCount = 0;   // byte ring indices + fill level
@@ -82,6 +107,14 @@ static uint32_t wrSlowCalls = 0; // calls >5 ms -- the erase signature
 static uint32_t wrMaxUs = 0;
 static uint32_t erUs = 0;       // time spent erasing ahead of the write pointer
 static uint32_t erCalls = 0;
+// Skip-identical state. `secSize` non-zero IS the "skip strategy is active" flag: it is set only
+// after the sector buffer is allocated and esp_ota_begin has left this module owning every erase.
+static uint8_t *secBuf = nullptr; // one erase sector of reconstructed image, awaiting comparison
+static uint32_t secSize = 0;      // == otaPart->erase_size while skipping; 0 = strategy off
+static uint32_t secOff = 0;       // slot offset the buffer's first byte belongs at
+static uint32_t secFill = 0;
+static uint32_t skSkipped = 0;    // sectors the slot already held
+static uint32_t skWritten = 0;    // sectors erased and reprogrammed
 static uint32_t staged = 0;     // accepted from the producer; sampled by the stall watchdog
 static uint32_t lastGranted = 0;
 static uint32_t lastProg = 0;
@@ -112,7 +145,81 @@ static esp_err_t eraseAhead(uint32_t needTo); // defined below, beside the drain
 /// versus a bad patch -- so the drain reports them as different lines rather than one "write" error.
 static bool sinkFailed = false;
 
+/// Consumer only. True only if the slot ALREADY holds exactly these bytes.
+///
+/// Every outcome that is not a proven byte-for-byte match returns false, including a read that
+/// fails: this decides whether to erase, so "I could not tell" has to cost an erase and a program.
+/// The inverse -- treating an unreadable sector as already correct -- writes nothing and leaves
+/// stale bytes inside an image that then passes its own SHA, because the digest is over the wire
+/// payload and never re-reads the slot.
+static bool sectorMatches(uint32_t off, const uint8_t *want, uint32_t n) {
+    uint8_t cmp[CMP_WINDOW];
+    for (uint32_t i = 0; i < n;) {
+        const uint32_t m = (n - i) < CMP_WINDOW ? (n - i) : (uint32_t) CMP_WINDOW;
+        if (esp_partition_read(otaPart, off + i, cmp, m) != ESP_OK) return false;
+        if (memcmp(cmp, want + i, m) != 0) return false; // first difference ends the read early
+        i += m;
+    }
+    return true;
+}
+
+/// Consumer only. Commit the buffered sector: skip it, or erase and program it. Empties the buffer
+/// and advances secOff either way, so the caller cannot accidentally commit the same bytes twice.
+static esp_err_t commitSector() {
+    const uint32_t off = secOff, n = secFill;
+    secOff += n;
+    secFill = 0;
+    // Sector 0 is never skipped, because esp_ota_end() rejects a handle nothing was ever written
+    // through (esp_ota_ops.c:490) -- so re-pushing an image the slot ALREADY holds would otherwise
+    // fail at the last step with ESP_ERR_INVALID_ARG and no boot switch, for the one reason that
+    // ought to be the fastest push there is.
+    //
+    // Measured, not assumed: this rule is currently redundant. esp_ota_begin erases sector 0 before
+    // the first comparison can read it, so sector 0 never matches anyway -- removing the `off != 0`
+    // below changes no test outcome. It stays because the invariant it states is local, and the
+    // thing that actually enforces it today is the erase size of a call made a hundred lines away.
+    if (off != 0 && sectorMatches(off, secBuf, n)) {
+        ++skSkipped;
+        return ESP_OK;
+    }
+    // A partial tail still erases its whole sector: the bytes past the image are not part of it,
+    // and leaving them would make the sector's content depend on what happened to be there before.
+    const int64_t t0 = esp_timer_get_time();
+    esp_err_t err = esp_partition_erase_range(otaPart, off, secSize);
+    erUs += (uint32_t) (esp_timer_get_time() - t0);
+    ++erCalls;
+    if (err != ESP_OK) return err;
+    err = esp_ota_write_with_offset(otaHandle, secBuf, n, off);
+    if (err == ESP_OK) ++skWritten;
+    return err;
+}
+
+/// Consumer only. Cut the reconstructed stream into erase sectors and commit each as it completes.
+/// The final partial sector stays buffered until otaBleEnd flushes it -- there is nothing to
+/// compare a half-filled sector against, and no reason to program it twice.
+static esp_err_t sinkBySector(const uint8_t *data, size_t len) {
+    while (len) {
+        const uint32_t room = secSize - secFill;
+        const uint32_t n = (uint32_t) (len < room ? len : room);
+        memcpy(secBuf + secFill, data, n);
+        secFill += n;
+        data += n;
+        len -= n;
+        imageWritten += n;
+        if (secFill == secSize) {
+            const esp_err_t err = commitSector();
+            if (err != ESP_OK) return err;
+        }
+    }
+    return ESP_OK;
+}
+
 static esp_err_t xformSink(const uint8_t *data, size_t len, void *) {
+    if (secSize) { // skip-identical strategy owns the slot; nothing is erased ahead of the data
+        const esp_err_t err = sinkBySector(data, len);
+        if (err != ESP_OK) sinkFailed = true;
+        return err;
+    }
     // Erase must lead the write pointer. This is where the image write offset is actually known --
     // a transform decides how many image bytes one wire slice becomes, and for delta that is tens
     // of KB, so bounding the wire slice instead would not bound this.
@@ -164,6 +271,10 @@ static int parseHex32(const char *hex, uint8_t out[32]) {
 
 static void freeRing() {
     if (ring) { heap_caps_free(ring); ring = nullptr; }
+    // secSize is the strategy flag as well as a size, so clearing it here disarms the sector path
+    // on every teardown -- including the ones that free the ring and then keep running.
+    if (secBuf) { heap_caps_free(secBuf); secBuf = nullptr; }
+    secSize = secOff = secFill = 0;
     rHead = rTail = rCount = 0;
 }
 
@@ -264,6 +375,40 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, ui
     // returns never touch *out_handle, which is what makes the zero a reliable discriminator.
     otaHandle = 0;
     erasedTo = eraseTarget = 0;
+    skSkipped = skWritten = 0;
+    [[maybe_unused]] const uint32_t esz = (uint32_t) otaPart->erase_size;
+
+    // Strategy, first refusal to skip-identical-sectors. It subsumes the other two: it removes
+    // flash work rather than rescheduling it, and it does so under every transform, because it
+    // acts on the RECONSTRUCTED image and never looks at the wire.
+    bool skipping = false;
+#if OTA_BLE_SECTOR_SKIP
+    // Two things can withdraw it, and both fall back rather than fail.
+    //  - Flash encryption. The ciphertext is address-tweaked, so identical plaintext at the same
+    //    offset does encrypt identically and the comparison would in principle hold -- but
+    //    esp_ota_write_with_offset refuses any size that is not a multiple of 16 under encryption
+    //    (esp_ota_ops.c:410-413), and none of this is testable on the boards in hand. An untested
+    //    guard on an encrypted slot is worth less than the erase it saves.
+    //  - No RAM for the sector buffer. A no-PSRAM board is exactly where this matters most, so it
+    //    is worth trying internal heap, but not worth failing the push over.
+    if (!esp_flash_encryption_enabled() && esz >= CMP_WINDOW && esz <= 8192) {
+        secBuf = (uint8_t *) heap_caps_malloc(esz, MALLOC_CAP_SPIRAM);
+        if (!secBuf) secBuf = (uint8_t *) heap_caps_malloc(esz, MALLOC_CAP_DEFAULT);
+        skipping = secBuf != nullptr;
+    }
+#endif
+    esp_err_t err;
+    if (skipping) {
+        // Erase exactly ONE sector inside begin. That is the smallest request that still leaves
+        // need_erase == false (esp_ota_ops.c:179), which is what hands every later erase to this
+        // module -- and it has to be the smallest, because anything esp_ota_begin erases up front
+        // is slot content destroyed before the comparison could read it.
+        err = esp_ota_begin(otaPart, esz, &otaHandle);
+        if (err == ESP_OK) {
+            secSize = esz; // arms the sector path in xformSink
+            secOff = secFill = 0;
+        }
+    } else
 #if defined(CONFIG_SPI_FLASH_YIELD_DURING_ERASE) && !defined(CONFIG_ESP_TASK_WDT_PANIC)
     // Which erase strategy, decided by who the bottleneck is going to be.
     //
@@ -280,9 +425,8 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, ui
     // only thing erase-ahead can recover is LINK time, and only a payload far smaller than the
     // image leaves the device with idle moments to spend erasing. A quarter is a wide margin
     // between the two regimes seen here (5 % and 69 %/100 %).
+    {
     const bool eraseAheadPays = (uint64_t) size * 4 < (uint64_t) outSize;
-    const uint32_t esz = (uint32_t) otaPart->erase_size;
-    esp_err_t err;
     if (eraseAheadPays) {
         // ALIGN_UP by hand: esp_ota_begin erases ALIGN_UP(size, erase_size) and we must know
         // exactly how much that was, because everything past it is ours to erase.
@@ -297,8 +441,9 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, ui
     } else {
         err = esp_ota_begin(otaPart, outSize, &otaHandle); // erase it all now; eraseTarget stays 0
     }
+    }
 #else
-    esp_err_t err = esp_ota_begin(otaPart, OTA_WITH_SEQUENTIAL_WRITES, &otaHandle);
+    { err = esp_ota_begin(otaPart, OTA_WITH_SEQUENTIAL_WRITES, &otaHandle); }
 #endif
     if (err != ESP_OK) {
         emit(OtaBleLevel::Warn, "OTAB FAIL esp_ota_begin %s", esp_err_to_name(err));
@@ -587,6 +732,24 @@ bool otaBleEnd() {
         emit(OtaBleLevel::Warn, "OTAB FAIL out %u/%u", (unsigned) imageWritten, (unsigned) expectedOut);
         otaBleAbort();
         return false;
+    }
+    // The last sector is still in the buffer: it could not be committed until the transform said
+    // there were no more bytes coming, because a partial sector has nothing to compare against.
+    if (secSize && secFill) {
+        const esp_err_t terr = commitSector();
+        if (terr != ESP_OK) {
+            emit(OtaBleLevel::Warn, "OTAB FAIL esp_ota_write %s", esp_err_to_name(terr));
+            otaBleAbort();
+            return false;
+        }
+    }
+    if (secSize) {
+        // What the comparison actually bought, in the units the erase budget is argued in. Reported
+        // before esp_ota_end so it survives a slot that fails validation -- that is precisely when
+        // you want to know how much of the slot this push left alone.
+        emit(OtaBleLevel::Info, "OTAB SKIP kept=%u wrote=%u erases=%u erase_ms=%u",
+             (unsigned) skSkipped, (unsigned) skWritten, (unsigned) erCalls,
+             (unsigned) (erUs / 1000));
     }
     esp_err_t err = esp_ota_end(otaHandle); // image validation (magic, esp_app_desc, signature)
     if (err != ESP_OK) {

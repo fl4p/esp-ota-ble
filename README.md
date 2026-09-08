@@ -113,12 +113,40 @@ missing OTA receiver should stop the build, not silently produce firmware that c
 
 ## Partitioning
 
-Requires a partition table with two app slots and an `otadata` partition. `esp_ota_begin` is called
-with **`OTA_WITH_SEQUENTIAL_WRITES`**, not `OTA_SIZE_UNKNOWN` — the two constants read alike and
-behave oppositely. A byte size or `OTA_SIZE_UNKNOWN` erases synchronously inside `esp_ota_begin`
-(and `OTA_SIZE_UNKNOWN` erases the *whole* partition, worse than passing the real size), which on a
-~1.7 MB slot blocks long enough to starve the idle task and trip a panic-on-timeout task watchdog.
-Only `OTA_WITH_SEQUENTIAL_WRITES` defers erasing to per-sector calls inside `esp_ota_write`.
+Requires a partition table with two app slots and an `otadata` partition.
+
+**The size passed to `esp_ota_begin` chooses an erase strategy, and the constants read alike while
+behaving oppositely.** `OTA_SIZE_UNKNOWN` erases the *whole* partition synchronously; a byte size
+erases `ALIGN_UP(size, erase_size)` synchronously; only `OTA_WITH_SEQUENTIAL_WRITES` defers erasing
+to per-sector calls inside `esp_ota_write`. On a ~1.7 MB slot a synchronous full erase blocks long
+enough to starve the idle task and trip a panic-on-timeout task watchdog.
+
+Three strategies, in the order the receiver prefers them:
+
+1. **Skip identical sectors** (default; `OTA_BLE_SECTOR_SKIP`). `esp_ota_begin` is passed exactly
+   one erase sector — the smallest request that still leaves `need_erase == false`, which is what
+   hands every later erase to this module. Each sector of the reconstructed image is then compared
+   against what the slot already holds, and erased and programmed only if it differs.
+
+   This is worth more than it sounds, because flash work, not link time, is where a push goes: 32.4
+   s of a measured 43.4 s raw push was inside `esp_ota_write`. A rebuild of the same firmware
+   changes only part of the image — with a stable layout, a one-line edit leaves about two thirds of
+   the sectors byte-identical (see `fugu-mppt-firmware/doc/2026-09-08-image-layout-stability-for-
+   ota.md`) — and every identical sector costs one 4 KB read instead of an erase plus a program.
+
+   It costs one erase-sector buffer of RAM and gives up 64 KB block erases, since a dirty sector is
+   erased on its own. **Whether that trade holds depends on the 4 KB sector-erase time, which is not
+   measured on this hardware.** The `OTAB SKIP` line reports `kept`, `wrote`, `erases` and
+   `erase_ms`, so the first real push measures it: `erase_ms / erases` is the number.
+
+   The receiver withdraws the strategy by itself on an encrypted flash (`esp_ota_write_with_offset`
+   refuses unaligned sizes there, and none of it is testable on the boards in hand) or when the
+   sector buffer will not allocate. Both fall back rather than fail.
+2. **Erase ahead of the writer**, when skipping is off and the payload is under a quarter of the
+   image. Erases a head block inside `begin` and keeps the rest erased just ahead of the write
+   pointer, hiding the erase under link time. It cannot be combined with skipping: it erases flash
+   before the bytes destined for it have arrived, which destroys the content the comparison reads.
+3. **`OTA_WITH_SEQUENTIAL_WRITES`**, the always-safe fallback.
 
 If the bootloader has `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, the freshly flashed image boots as
 `PENDING_VERIFY` and **must** call `esp_ota_mark_app_valid_cancel_rollback()` once it has proven
@@ -148,15 +176,27 @@ it over a wire.
 ./test/run.sh
 ```
 
-Host-native (clang++, ASan/UBSan), no hardware. ESP-IDF is shimmed in `test/host-stub/`, with a fake
-partition that models *when* erases happen — begin-time versus per-write — because that is the axis
-the `OTA_WITH_SEQUENTIAL_WRITES` choice turns on, and a fake that only modelled the end state would
-pass on either constant. SHA-256 in the stub is a real implementation: a digest that always matched
-would make the mismatch test pass unconditionally.
+Host-native (clang++, ASan/UBSan), no hardware, and run three times — once per erase strategy, since
+the two the default displaces are still reachable fallbacks and compiling only the default would
+leave them unbuilt as well as untested.
+
+ESP-IDF is shimmed in `test/host-stub/`. The fake partition models *when* erases happen — begin-time
+versus per-write — because that is the axis the `OTA_WITH_SEQUENTIAL_WRITES` choice turns on, and a
+fake that only modelled the end state would pass on either constant. It also models the update
+slot's actual bytes, that erasing destroys them, and that `esp_ota_end` refuses a handle nothing was
+written through: skip-identical decisions are asserted against what the slot ends up holding, which
+is the only thing the bootloader ever reads. SHA-256 in the stub is a real implementation: a digest
+that always matched would make the mismatch test pass unconditionally.
 
 Every failure case asserts that the boot partition did **not** move, not merely that a call returned
 false. The suite is calibrated — swapping in `OTA_SIZE_UNKNOWN`, or removing the stale-abort
-guards, makes it fail.
+guards, makes it fail. So does making an unreadable sector compare as a match, or dropping the
+final partial sector's flush.
+
+One calibration that does **not** bite, recorded so it is not mistaken for coverage: removing the
+"sector 0 is never skipped" rule leaves every test passing, because `esp_ota_begin` erases sector 0
+before the first comparison can read it. The rule is a local restatement of an invariant enforced
+somewhere else, not the thing enforcing it.
 
 Run it before flashing any consumer.
 
