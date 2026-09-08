@@ -56,10 +56,8 @@ link time left to hide behind, so it becomes the floor. Delta's ceiling is there
 about `5.8 s erase + 8.6 s apply ≈ 14.3 s` of device time, however small the patch —
 overlapping erase with reception is the only thing left after that.
 
-**The remaining ~24 s of wall clock is not the push at all**: BLE scan, connect,
-`ping`, a fixed 2 s sleep in the version probe, `info`, then the erase. On a delta
-push that overhead is now larger than the transfer, and it is where the next
-worthwhile second lives.
+**The remaining ~24 s of wall clock was not the push at all** — and has since been
+removed; see the next section.
 
 ## Patch sizes, host side
 
@@ -109,3 +107,54 @@ upstream C sources under `components/`, because that layout exports the `tamp/`
 directory itself and the header is `<decompressor.h>`. Fixed in `3f3349b`; the
 availability list over the wire is what caught it, which is the argument for having
 the device report its capabilities rather than the host assuming them.
+
+
+## Follow-up: the host overhead, removed
+
+The ~24 s that was neither transfer nor erase turned out to be almost entirely one
+line. `BleakScanner.discover()` always sleeps out its whole timeout, so every push
+paid a flat 15 s scan. The board is actually first seen **0.31 / 0.36 / 0.94 s** into
+a scan (three runs, 2026-09-08).
+
+Scanning live with a detection callback and stopping on the first exact name match
+makes the timeout a *bound* instead of a duration — which also allowed raising it from
+15 s to 30 s, the reliability fix the 2026-09-03 miss asked for (a 15 s `discover()`
+found nothing where a 30 s one saw the board at RSSI −69, same room). Slow to fail,
+fast to succeed. Plus: the version probe now waits for its answer rather than sleeping
+a flat 2 s, and is skipped under `--force`.
+
+Same board, same 95 202-byte payload (fugu `76eac0b`):
+
+| | before | after |
+|---|---|---|
+| delta, total wall | 36.22 s | **21.23 s** |
+| ├ host overhead (connect → begin, minus erase) | ~18.9 s | **~2.1 s** |
+| ├ device erase | 5.8 s | 6.2 s |
+| └ transfer | 11.51 s | 9.01 s |
+| raw, total wall | 62.53 s | **41.68 s** |
+
+A second fast-path delta run gave transfer 9.02 s — the same to 10 ms.
+
+### What the speedup uncovered
+
+The slow scan had been hiding a real hazard by accident. A freshly booted image is
+`PENDING_VERIFY` until the firmware confirms itself at 20 s uptime, and
+`esp_ota_begin` refuses until then with `ESP_ERR_OTA_ROLLBACK_INVALID_STATE`.
+Back-to-back pushes used to clear that window because the host spent ~19 s scanning
+first. They no longer do, and the next push failed at 2.37 s. `push()` now waits and
+retries for that specific failure — reproduced and confirmed working — while every
+other refusal still surfaces immediately.
+
+### Where the 21 s now is
+
+    ~2 s   host: scan, connect, ping, info
+     6.2 s device: up-front erase of the slot
+     9.0 s device: apply patch + write 1.77 MB (8.6 s of it is esp_ota_write)
+    ~4 s   host: waiting for the board to advertise again after reboot
+
+The link is now ~0.4 s of the whole thing. The next real lever is the **6.2 s erase**,
+which could overlap with reception if the receiver erased ahead of the write pointer
+in the background instead of all at once up front; that would put the floor near 15 s.
+Below that sits the 8.6 s of flash writing, which nothing avoids while the full image
+has to be written — and sector-level skipping does not help, because 403 of 433 4 KB
+sectors differ between two real builds (93 %), code having shifted underneath.
