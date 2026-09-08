@@ -34,6 +34,7 @@ import re
 
 __all__ = [
     "OtaBleError", "find_device", "BleOtaLink", "adapt_link", "usable_chunk",
+    "acquire_bluez_mtu",
     "push_image",
 ]
 
@@ -51,6 +52,10 @@ _RX_MAX = 64 * 1024
 # The largest firmware write this module will issue on BlueZ, whatever the MTU
 # says. See usable_chunk() for why this number exists and how it was arrived at.
 BLUEZ_MAX_FW_WRITE = 400
+
+# The mandatory ATT default. bleak's BlueZ backend reports exactly this until the
+# real MTU is acquired, so it doubles as the sentinel for "nobody has asked yet".
+_ATT_DEFAULT_MTU = 23
 
 
 class OtaBleError(Exception):
@@ -87,11 +92,15 @@ def usable_chunk(mtu, backend_is_bluez=None, max_write=0):
     514 was not bisected; 400 is used because it is measured end-to-end and 482
     is known to be too close to a size that fails.
 
-    Do NOT "fix" this by calling bleak's `_acquire_mtu()` and trusting the
-    result. On BlueZ, bleak reports the 23-byte default until the MTU is
-    acquired, which is exactly why the two older tools chunk at 20 bytes there
-    and have never corrupted an image. Acquiring the MTU to go faster is what
-    introduced the failure.
+    Acquiring the MTU is NOT the hazard; writing `mtu - 3` afterwards is. On
+    BlueZ bleak reports the 23-byte default until the MTU is acquired, which is
+    why the older tools chunk at 20 bytes there and have never corrupted an
+    image — and also why they are ~6x slower than CoreBluetooth on the same
+    link (1.76 MB image: 6m33s at 20-byte writes from a Pi vs 64 s from a Mac,
+    measured 2026-09-08). BleOtaLink now acquires the MTU so this function sees
+    the real number, and the cap below is what keeps that safe: do not remove
+    it, and do not raise it above a size that has actually carried an image end
+    to end.
     """
     # PREFER THE TRANSPORT'S OWN ANSWER. `max_write` is the characteristic's
     # max_write_without_response_size, which every backend computes from the
@@ -116,6 +125,35 @@ def usable_chunk(mtu, backend_is_bluez=None, max_write=0):
     if backend_is_bluez:
         chunk = min(chunk, BLUEZ_MAX_FW_WRITE)
     return max(chunk, 20)
+
+
+async def acquire_bluez_mtu(client):
+    """Make BlueZ report the ATT MTU it actually negotiated. Returns True if it did.
+
+    bleak's BlueZ backend reports the mandatory default (23) and warns until the
+    MTU is acquired, and the characteristic's `max_write_without_response_size`
+    is derived from that same 23 — so BOTH numbers `usable_chunk()` consults say
+    "20 bytes" on a link that negotiated far more. Measured on a Pi (BlueZ 5.82)
+    2026-09-08: `mtu_size` 23 before this call and 247 after, on a link whose
+    1.76 MB push took 6m33s at 20-byte writes where the same image over
+    CoreBluetooth took 64 s.
+
+    This is safe ONLY because `usable_chunk()` caps BlueZ at BLUEZ_MAX_FW_WRITE.
+    Acquiring the MTU and then writing `mtu - 3` is what corrupted an image;
+    acquiring it and writing a capped chunk is a different thing.
+
+    Best-effort and idempotent: a backend without the private method (macOS), an
+    MTU that is already known, or a failure all leave the caller exactly where it
+    was — on the slow but never-corrupting 20-byte path.
+    """
+    acquire = getattr(getattr(client, "_backend", None), "_acquire_mtu", None)
+    if acquire is None or client.mtu_size > _ATT_DEFAULT_MTU:
+        return False
+    try:
+        await acquire()
+    except Exception:
+        return False
+    return client.mtu_size > _ATT_DEFAULT_MTU
 
 
 async def find_device(name_prefix=None, address=None, service_uuid=None,
@@ -165,6 +203,9 @@ class BleOtaLink:
         self._chunk_override = int(chunk or 0)
         self._cli = None
         self.mtu = 23
+        # True only once we have made BlueZ report the negotiated MTU; gates the
+        # staleness fallback in _max_write() so CoreBluetooth is never affected.
+        self._mtu_acquired = False
         self.disconnected = asyncio.Event()
         self._on_line = None
         self._rx = b""
@@ -197,6 +238,7 @@ class BleOtaLink:
                 await self._cli.connect()
                 await self._cli.start_notify(self.notify_uuid,
                                              lambda _, p: self._feed(p))
+                await self._acquire_mtu_if_default()
                 self.mtu = self._cli.mtu_size
                 self.disconnected.clear()
                 return
@@ -221,19 +263,33 @@ class BleOtaLink:
             return self._chunk_override
         return usable_chunk(self.mtu, max_write=self._max_write())
 
-    def _max_write(self):
-        """The characteristic's own maximum write-without-response size.
+    async def _acquire_mtu_if_default(self):
+        """Acquire the MTU for this link. See module-level acquire_bluez_mtu()."""
+        self._mtu_acquired = await acquire_bluez_mtu(self._cli)
 
-        This is the authoritative number and the OS is not: bleak documents
-        BlueZ's `mtu_size` as always 23 until the MTU is acquired, so deriving
-        the chunk from it silently yields 20 bytes. That is not a safety
-        margin, it is a 25x throughput loss dressed as one - the measured
-        1.4 kB/s on this path was 20-byte writes, not the 400 the cap implies.
+    def _max_write(self):
+        """The characteristic's maximum write-without-response size, if honest.
+
+        Normally this is better than an OS test, which cannot see through an
+        adapted transport at all (fugu tunnels GATT through an ESPHome proxy:
+        the data plane is an ESP32 whatever OS the script runs on).
+
+        BlueZ computes it ONCE, at service resolution, from the MTU it had then,
+        and acquiring the MTU afterwards does NOT refresh it — measured
+        2026-09-08: still 20 while `mtu_size` reported 247. So once we have
+        acquired the MTU ourselves, a value below what that MTU allows is stale
+        rather than authoritative, and we let `usable_chunk()` derive (and cap)
+        from the MTU instead. This narrow condition keeps CoreBluetooth, where
+        the characteristic IS authoritative and deliberately reports less than
+        `mtu - 3`, on its existing path.
         """
         try:
             ch = self._cli.services.get_characteristic(self.fw_uuid)
             n = getattr(ch, "max_write_without_response_size", None)
-            return int(n) if n else 0
+            n = int(n) if n else 0
+            if n and self._mtu_acquired and n < self.mtu - 3:
+                return 0
+            return n
         except Exception:
             return 0
 
