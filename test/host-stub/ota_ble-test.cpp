@@ -745,6 +745,27 @@ static void test_progress_and_credit() {
     end_case();
 }
 
+static void test_final_credit_is_not_flooded() {
+    begin_case("final grant is announced once, then repeated on timeout");
+    auto img = makeImage(8192);
+    otaBleSubmitCommand(beginCmd(img).c_str());
+    otaBleTick(0);
+    CHECK(countLines("OTAB CRED 8192") == 1, "initial grant absent or duplicated");
+    for (size_t off = 0; off < img.size(); off += 256) {
+        otaBleStageBytes(img.data() + off, std::min(size_t(256), img.size() - off));
+        otaBleTick(0);
+    }
+    CHECK(countLines("OTAB CRED 8192") == 1, "unchanged final grant flooded status");
+    otaBleTick(4999);
+    CHECK(countLines("OTAB CRED 8192") == 1, "final grant repeated early");
+    otaBleTick(5000);
+    CHECK(countLines("OTAB CRED 8192") == 2, "lost final grant was not repeated");
+    otaBleSubmitCommand("end");
+    otaBleTick(5001);
+    CHECK(g_restarted && g_fake.bootPart, "credit suppression broke complete transfer");
+    end_case();
+}
+
 static void test_credit_repeat() {
     begin_case("credit re-announcement");
     auto img = makeImage(20000);
@@ -1126,6 +1147,7 @@ int main() {
     test_ring_wrap();
     test_progress_and_credit();
     test_credit_repeat();
+    test_final_credit_is_not_flooded();
     test_raw_xform_is_the_old_protocol();
     test_xform_unknown_and_unavailable();
     test_xform_wire_may_exceed_the_image();

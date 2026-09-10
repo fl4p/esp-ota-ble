@@ -283,7 +283,7 @@ static void grantCredit() {
     // flash drains; announce advances only in CRED_STEP jumps, while repeatCredit recovers a lost one.
     uint32_t g = written + RING_CAP;
     if (g > expectedSize) g = expectedSize;
-    if (g >= lastGranted + CRED_STEP || g == expectedSize) {
+    if (g > lastGranted && (g >= lastGranted + CRED_STEP || g == expectedSize)) {
         lastGranted = g;
         emit(OtaBleLevel::Info, "OTAB CRED %u", (unsigned) g);
         creditRepeatArmed = false;
