@@ -1,0 +1,11 @@
+SETUP OTAB AUTH ok
+SETUP BENCH LINK interval=12 mtu=517 phy_known=1 tx=2 rx=2
+BEFORE {"base": "19ee4942881a9fcd451dcd23fed1a348e08d0676758d5552d8fcc31d60677cdd", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}
+LINK mtu=515 max_write=512 chunk=495
+[0.135] OTAB RING 262144
+[0.135] OTAB READY part=app1 size=718848 xform=raw out=718848
+[15.390] OTAB STAT write_ms=14019 calls=511 erase_ms=9365 out=718848
+[15.646] OTAB SKIP kept=0 wrote=176 erases=176 erase_ms=9422
+[15.646] OTAB OK rebooting
+SETUP OTAB AUTH ok
+RESULT {"after": {"base": "678ff2a8aed507ae3eacbf66e4956eb70c9cbec253b16348969177ddaaadd4dd", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "before": {"base": "19ee4942881a9fcd451dcd23fed1a348e08d0676758d5552d8fcc31d60677cdd", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "burst": 1, "bytes": 718848, "chunk": 495, "elapsed": 16.470659999991767, "image": "/tmp/node_W.bin", "kB_s": 43.64415269335651, "name": "farmnode-202A29", "paced_writes": 1452, "real_write": true, "setup": ["link"], "skip": {"erase_ms": "9422", "erases": "176", "kept": "0", "wrote": "176"}, "stats": {"calls": "511", "erase_ms": "9365", "out": "718848", "write_ms": "14019"}, "transfer_hint": true, "verified": true, "wire": "raw", "wire_bytes": 718848}

@@ -1,0 +1,248 @@
+{
+  "accepted": [
+    {
+      "log": "final-1-raw.log",
+      "after": {
+        "base": "f408a9dc9eb8a54e57a26d1ae3792059e1bfdad8e5991003dc0ba0d7b5c51de0",
+        "resume": null,
+        "resume_capable": true,
+        "run": "app1",
+        "slot": 1572864,
+        "xforms": [
+          "raw",
+          "tamp",
+          "delta"
+        ]
+      },
+      "before": {
+        "base": "19ee4942881a9fcd451dcd23fed1a348e08d0676758d5552d8fcc31d60677cdd",
+        "resume": null,
+        "resume_capable": true,
+        "run": "app0",
+        "slot": 1572864,
+        "xforms": [
+          "raw",
+          "tamp",
+          "delta"
+        ]
+      },
+      "burst": 1,
+      "bytes": 754624,
+      "chunk": 495,
+      "elapsed": 17.648180166026577,
+      "image": "/tmp/node_X.bin",
+      "kB_s": 42.759309622908326,
+      "name": "farmnode-202A29",
+      "paced_writes": 1524,
+      "real_write": true,
+      "setup": [
+        "link"
+      ],
+      "skip": {
+        "erase_ms": "9828",
+        "erases": "185",
+        "kept": "0",
+        "wrote": "185"
+      },
+      "stats": {
+        "calls": "570",
+        "erase_ms": "9770",
+        "out": "754624",
+        "write_ms": "14630"
+      },
+      "transfer_hint": true,
+      "verified": true,
+      "wire": "raw",
+      "wire_bytes": 754624
+    },
+    {
+      "log": "final-2-raw.log",
+      "after": {
+        "base": "678ff2a8aed507ae3eacbf66e4956eb70c9cbec253b16348969177ddaaadd4dd",
+        "resume": null,
+        "resume_capable": true,
+        "run": "app1",
+        "slot": 1572864,
+        "xforms": [
+          "raw",
+          "tamp",
+          "delta"
+        ]
+      },
+      "before": {
+        "base": "19ee4942881a9fcd451dcd23fed1a348e08d0676758d5552d8fcc31d60677cdd",
+        "resume": null,
+        "resume_capable": true,
+        "run": "app0",
+        "slot": 1572864,
+        "xforms": [
+          "raw",
+          "tamp",
+          "delta"
+        ]
+      },
+      "burst": 1,
+      "bytes": 718848,
+      "chunk": 495,
+      "elapsed": 16.470659999991767,
+      "image": "/tmp/node_W.bin",
+      "kB_s": 43.64415269335651,
+      "name": "farmnode-202A29",
+      "paced_writes": 1452,
+      "real_write": true,
+      "setup": [
+        "link"
+      ],
+      "skip": {
+        "erase_ms": "9422",
+        "erases": "176",
+        "kept": "0",
+        "wrote": "176"
+      },
+      "stats": {
+        "calls": "511",
+        "erase_ms": "9365",
+        "out": "718848",
+        "write_ms": "14019"
+      },
+      "transfer_hint": true,
+      "verified": true,
+      "wire": "raw",
+      "wire_bytes": 718848
+    },
+    {
+      "log": "final-4-raw.log",
+      "after": {
+        "base": "678ff2a8aed507ae3eacbf66e4956eb70c9cbec253b16348969177ddaaadd4dd",
+        "resume": null,
+        "resume_capable": true,
+        "run": "app1",
+        "slot": 1572864,
+        "xforms": [
+          "raw",
+          "tamp",
+          "delta"
+        ]
+      },
+      "before": {
+        "base": "19ee4942881a9fcd451dcd23fed1a348e08d0676758d5552d8fcc31d60677cdd",
+        "resume": null,
+        "resume_capable": true,
+        "run": "app0",
+        "slot": 1572864,
+        "xforms": [
+          "raw",
+          "tamp",
+          "delta"
+        ]
+      },
+      "burst": 1,
+      "bytes": 718848,
+      "chunk": 495,
+      "elapsed": 16.786504124989733,
+      "image": "/tmp/node_W.bin",
+      "kB_s": 42.82297223099986,
+      "name": "farmnode-202A29",
+      "paced_writes": 1452,
+      "real_write": true,
+      "setup": [
+        "link"
+      ],
+      "skip": {
+        "erase_ms": "9396",
+        "erases": "176",
+        "kept": "0",
+        "wrote": "176"
+      },
+      "stats": {
+        "calls": "524",
+        "erase_ms": "9339",
+        "out": "718848",
+        "write_ms": "14013"
+      },
+      "transfer_hint": true,
+      "verified": true,
+      "wire": "raw",
+      "wire_bytes": 718848
+    }
+  ],
+  "rejected": {
+    "log": "final-3-raw.log",
+    "after": {
+      "base": "f408a9dc9eb8a54e57a26d1ae3792059e1bfdad8e5991003dc0ba0d7b5c51de0",
+      "resume": null,
+      "resume_capable": true,
+      "run": "app1",
+      "slot": 1572864,
+      "xforms": [
+        "raw",
+        "tamp",
+        "delta"
+      ]
+    },
+    "before": {
+      "base": "19ee4942881a9fcd451dcd23fed1a348e08d0676758d5552d8fcc31d60677cdd",
+      "resume": null,
+      "resume_capable": true,
+      "run": "app0",
+      "slot": 1572864,
+      "xforms": [
+        "raw",
+        "tamp",
+        "delta"
+      ]
+    },
+    "burst": 1,
+    "bytes": 754624,
+    "chunk": 495,
+    "elapsed": 17.06762891705148,
+    "image": "/tmp/node_X.bin",
+    "kB_s": 44.21375714620149,
+    "name": "farmnode-202A29",
+    "paced_writes": 1524,
+    "real_write": false,
+    "setup": [
+      "link"
+    ],
+    "skip": {
+      "erase_ms": "9388",
+      "erases": "176",
+      "kept": "9",
+      "wrote": "176"
+    },
+    "stats": {
+      "calls": "555",
+      "erase_ms": "9388",
+      "out": "754624",
+      "write_ms": "14090"
+    },
+    "transfer_hint": true,
+    "verified": true,
+    "wire": "raw",
+    "wire_bytes": 754624
+  },
+  "node_mean_kB_s": 43.07547818242156,
+  "fugu_historical_mean_kB_s": 42.1975503013495,
+  "fugu_historical_bytes_seconds": [
+    [
+      1789024,
+      41.95
+    ],
+    [
+      1789024,
+      42.72
+    ],
+    [
+      1650912,
+      39.82
+    ],
+    [
+      1650912,
+      40.01
+    ],
+    [
+      1789024,
+      40.9
+    ]
+  ]
+}

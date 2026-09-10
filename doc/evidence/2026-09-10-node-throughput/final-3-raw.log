@@ -1,0 +1,27 @@
+SETUP OTAB AUTH ok
+SETUP BENCH LINK interval=12 mtu=517 phy_known=1 tx=2 rx=2
+BEFORE {"base": "19ee4942881a9fcd451dcd23fed1a348e08d0676758d5552d8fcc31d60677cdd", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}
+LINK mtu=515 max_write=512 chunk=495
+[0.134] OTAB RING 262144
+[0.134] OTAB READY part=app1 size=754624 xform=raw out=754624
+[15.960] OTAB STAT write_ms=14090 calls=555 erase_ms=9388 out=754624
+[16.154] OTAB SKIP kept=9 wrote=176 erases=176 erase_ms=9388
+[16.154] OTAB OK rebooting
+SETUP OTAB AUTH ok
+RESULT {"after": {"base": "f408a9dc9eb8a54e57a26d1ae3792059e1bfdad8e5991003dc0ba0d7b5c51de0", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "before": {"base": "19ee4942881a9fcd451dcd23fed1a348e08d0676758d5552d8fcc31d60677cdd", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "burst": 1, "bytes": 754624, "chunk": 495, "elapsed": 17.06762891705148, "image": "/tmp/node_X.bin", "kB_s": 44.21375714620149, "name": "farmnode-202A29", "paced_writes": 1524, "real_write": false, "setup": ["link"], "skip": {"erase_ms": "9388", "erases": "176", "kept": "9", "wrote": "176"}, "stats": {"calls": "555", "erase_ms": "9388", "out": "754624", "write_ms": "14090"}, "transfer_hint": true, "verified": true, "wire": "raw", "wire_bytes": 754624}
+Traceback (most recent call last):
+  File "/Users/fab/o2p-push/nodehead/tools/bench_ble_ota.py", line 121, in <module>
+    asyncio.run(run(ap.parse_args()))
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/runners.py", line 205, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/runners.py", line 128, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/base_events.py", line 720, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/Users/fab/o2p-push/nodehead/tools/bench_ble_ota.py", line 108, in run
+    raise RuntimeError('run cannot count: image verification or real-write evidence failed')
+RuntimeError: run cannot count: image verification or real-write evidence failed

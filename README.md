@@ -88,6 +88,11 @@ Three rules the design depends on:
    other core. On the fugu converter, OTAing at full power reliably reset the device mid-download
    until the real-time loop was stopped first.
 
+Keep the status hook nonblocking: queue BLE notifications, and send serial replies only when
+serial is the driving transport. Synchronously mirroring every BLE credit to an unread USB CDC
+console stalled the node's flash consumer. Drain final status before restarting so `OTAB SKIP`
+and the completion reply can reach the host; still verify the running image after reboot.
+
 ### PlatformIO
 
 ```ini
@@ -169,6 +174,21 @@ uptime threshold plus a liveness signal from the real work — not merely that `
 it with a watchdog covering early boot: an image that hangs before the confirm point never resets, so
 the bootloader never gets its chance to roll back, and the device is bricked until someone reflashes
 it over a wire.
+
+## Throughput tuning
+
+The node integration reached **43.08 decimal kB/s** in three verified full raw rewrites on a
+PSRAM ESP32-S3, matching fugu's **42.20 kB/s** historical mean on that bench. The working
+combination was an exact **15 ms** interval request, a subsequent **2M PHY** request,
+**495-byte** writes within the transport's limit, and nonblocking status delivery.
+These are consumer/transport settings, not automatic behavior supplied by this receiver.
+
+See [the measured configuration, evidence and remaining experiments](doc/2026-09-10-node-throughput.md).
+It supersedes the earlier node gap and the broad claim that interval/chunk tuning was exhausted
+in [the payload benchmark](doc/2026-09-08-payload-transforms-benchmark.md). Individual speedups
+were not isolated: do not attribute the whole gain to one setting or promise it on another peer.
+Require final sector counts and post-boot image identity for a full-write benchmark;
+substantial `erase_ms` alone can conceal skipped tail sectors.
 
 ## Tests
 
@@ -279,6 +299,10 @@ answer.
 - **400 bytes** (`BLUEZ_MAX_FW_WRITE`) is *empirical*: one Pi/BlueZ/NimBLE
   combination, one successful image. It says nothing about other controllers or
   a proxied transport. It is a regression point, not a safety bound.
+- **495 bytes** is the two-PDU packing candidate: `2 * 251 - 4 - 3`, assuming
+  251-byte LL payloads. It worked with CoreBluetooth in the node benchmark above.
+  Preserve smaller characteristic/backend limits (including the existing BlueZ
+  cap); a larger negotiated MTU alone does not authorize larger writes.
 
 #### `push_image()` returning True is not proof the new image runs
 
