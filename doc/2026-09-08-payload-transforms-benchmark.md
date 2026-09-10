@@ -31,18 +31,24 @@ inside `otaXformFeed` (reconstruction **plus** `esp_ota_write`).
 
 | transform | wire bytes | % of image | erase | transfer | wire rate | write_ms | total wall |
 |---|---|---|---|---|---|---|---|
-| raw | 1 769 984 | 100 % | 5.8 s | **36.55 s** | 47.3 kB/s | 9015 | 61.0 s |
-| raw | 1 772 512 | 100 % | 5.9 s | **38.15 s** | 45.4 kB/s | 9065 | 62.5 s |
-| tamp | 1 223 703 | 69.0 % | 5.7 s | **25.49 s** | 46.9 kB/s | 8731 | 49.9 s |
-| tamp | 1 223 703 | 69.0 % | 5.8 s | **25.07 s** | 47.7 kB/s | 8708 | 49.5 s |
-| delta | 69 294 | 3.9 % | 5.8 s | **11.27 s** | 6.0 kB/s | 8503 | 35.9 s |
-| delta | 95 202 | 5.4 % | 6.1 s | **11.51 s** | 8.1 kB/s | 8675 | 36.2 s |
+| raw | 1 769 984 | 100 % | 5.8 s | **36.55 s** | 48.43 kB/s | 9015 | 61.0 s |
+| raw | 1 772 512 | 100 % | 5.9 s | **38.15 s** | 46.46 kB/s | 9065 | 62.5 s |
+| tamp | 1 223 703 | 69.0 % | 5.7 s | **25.49 s** | 48.01 kB/s | 8731 | 49.9 s |
+| tamp | 1 223 703 | 69.0 % | 5.8 s | **25.07 s** | 48.81 kB/s | 8708 | 49.5 s |
+| delta | 69 294 | 3.9 % | 5.8 s | **11.27 s** | 6.15 kB/s | 8503 | 35.9 s |
+| delta | 95 202 | 5.4 % | 6.1 s | **11.51 s** | 8.27 kB/s | 8675 | 36.2 s |
+
+> **Unit correction, 2026-09-10.** This column originally read 47.3 / 45.4 / 46.9 /
+> 47.7 / 6.0 / 8.1, which are **KiB/s** (÷1024) despite the "kB/s" heading. The wire
+> bytes and transfer times are unchanged and were correct; only the derived rate is
+> restated in the decimal kB/s this doc declares at the top. Anything quoting the old
+> figures against a decimal rate was comparing across a 2.4 % unit error.
 
 **Transfer 3.3× faster, wall clock 1.7×.**
 
 ## What the numbers actually say
 
-**The wire rate is the same ~47 kB/s for raw and tamp.** That is the independent
+**The wire rate is the same ~48 kB/s for raw and tamp.** That is the independent
 confirmation that the link was the constraint and that compression does nothing
 clever — it just has fewer bytes to push through the same pipe.
 
@@ -233,11 +239,16 @@ comparison. All figures below are `--xform raw` — see the honest limits at the
 ### The confound this commit introduced
 
 `2233857` makes **re-pushing an image the device already holds** a near-no-op: one
-sector programmed instead of all of them, and roughly **10× the apparent throughput**.
-The transfer completes, the digest verifies, the device reboots into the image. Only
-the counters say it never wrote anything — and the natural way to benchmark an OTA is
-to push the same image repeatedly, so this is easy to hit by accident. It caught this
-session's measurements more than once.
+sector programmed instead of all of them. The transfer completes, the digest verifies,
+the device reboots into the image. Only the counters say it never wrote anything — and
+the natural way to benchmark an OTA is to push the same image repeatedly, so this is
+easy to hit by accident. It caught this session's measurements more than once.
+
+**How much it inflates the number depends on what was limiting.** Where flash dominates
+— a small staging ring, so the link waits on the write — a skip is worth roughly **10×**.
+Where the link dominates it is worth almost nothing: at the 256 KB ring below, a skip
+push and three real writes measured the same ~27–28 kB/s. Do not expect the speed-up as
+a signature; expect it only in the flash-bound regime.
 
 | signature | meaning |
 |---|---|
@@ -252,6 +263,23 @@ The arithmetic gives it away without knowing the skip path exists: 717 904 B in
 **A throughput figure quoted without one of these lines is not a measurement of an
 OTA.** It measures the link plus the sector comparison — a legitimate number for a
 different question, which must be labelled as such.
+
+**Three conditions on reading `erase_ms`, all from the source at `2233857`:**
+
+- **Low `erase_ms` does not always mean a skip.** `erUs` is reset at `ota_ble.cpp:494`,
+  *after* the `esp_ota_begin` calls at 406–446, so an up-front slot erase is never
+  counted. And under the `OTA_WITH_SEQUENTIAL_WRITES` fallback (`:575`) `esp_ota_write`
+  owns the erasing, which never reaches `erUs` either. Both are full writes reporting
+  near-zero erase time. The signatures above hold only when the sector-skip strategy is
+  the one that actually armed.
+- **The strategy has more arming conditions than the buffer allocation**: it is
+  compile-time gated in `ota_ble.h` (`:70`), and `secSize` is set from
+  `otaPart->erase_size` only after `esp_ota_begin` leaves this module owning every erase
+  (`:110–113`).
+- **Neither line proves the OTA completed.** `OTAB STAT` (`:634`) precedes final-tail
+  processing, and `OTAB SKIP` (`:750`) is emitted deliberately *before* `esp_ota_end`
+  (`:754`) so it survives a slot that fails validation. A push can print both and still
+  fail.
 
 Forcing a real write needs two images differing almost everywhere, confirmed *per run*:
 one Kconfig flag (`FUGU_WITH_BLE_ADV`) moved **4 of 437** sectors, while rebuilding the
@@ -312,17 +340,30 @@ each grew independently. That is why no single realignment fixes it, and why the
 
 ### fugu baseline
 
-**~40.7 kB/s, n=4**, A↔C alternation with 437/437 sectors differing, every run verified
-a real write by `erase_ms ≈ 23 000`. Notably fugu achieves this with `OTAB RING 8192`
-and `SPIRAM 0`.
+**~40.7 kB/s, n=4** (40.15 / 40.33 / 40.82 / 41.54), A↔C alternation with 437/437
+sectors differing, every run verified a real write by `erase_ms ≈ 23 000`. Notably fugu
+achieves this with `OTAB RING 8192` and `SPIRAM 0`.
+
+> **Do not reuse "alternate two images" as the recipe.** These runs were saved by their
+> per-run counters, not by the alternation. `sectorMatches()` compares the **destination**
+> slot (`esp_partition_read(otaPart, …)`, `ota_ble.cpp:155`), and on an A/B receiver that
+> slot holds the image from **two** pushes ago. So once the two slots hold A and C,
+> alternating A↔C sends each image straight back to the slot that already contains it —
+> the exact condition the skip path elides. Alternation is necessary, not sufficient:
+> check `erase_ms` on every run.
 
 ### What moved the node from 2.22 to ~28 kB/s
 
 **The staging ring was the entire early gap.** `RING_CAP_PSRAM` had been parked at 8 KB
 on an earlier confounded measurement, and the benchmark was running `esp32s3_blebench`
-(no PSRAM) rather than `esp32s3_psrambench`. Restoring 256 KB: **1.88–2.37 kB/s → 26–28
-kB/s**, and the run-to-run spread collapsed from 3.35× to roughly ±3 % around a ~27
-median (with occasional 2× slow outliers — one 13.84 kB/s run did not reproduce).
+(no PSRAM) rather than `esp32s3_psrambench`. Restoring 256 KB: **1.93–2.42 kB/s → 26–28
+kB/s**, and the run-to-run spread collapsed from 3.35× to a ~27 median with occasional
+2× slow outliers — one 13.84 kB/s run did not reproduce.
+
+> **Unit note.** The pre-fix figures are often quoted as 1.88 / 2.37 / 12.88, which are
+> **KiB/s**. In the decimal kB/s used throughout this doc they are **1.93 / 2.42 /
+> 13.20** (717 168 B / 372.63 s, 717 904 B / 296.34 s, 717 520 B / 54.38 s). The three
+> runs also differ slightly in image size, so they are not one controlled series.
 
 Verified real-write runs at 256 KB: 26.30 (`erase_ms=7438`), 27.96 (`erase_ms=7317`),
 26.84 (`erase_ms=6205`).
@@ -334,12 +375,25 @@ link work specifically.
 
 ### Levers tested and eliminated
 
-**Connection interval is not available.** Measured on air with an nRF52840 sniffer: 948
-events over ~28.7 s = **30.3 ms**, matching `interval=24`. Requesting a QA1931-compliant
-`12..24` changed nothing — **macOS grants the range *maximum*, not the minimum** — and
-since QA1931 forbids Max < Min+15 ms with Min ≥ 15 ms, 15 ms is unobtainable by asking.
-An earlier claim in fugu's `bleota.cpp` that a grant at the 15 ms floor was "worth ~2×"
-is refuted by this capture.
+**Connection interval: one request refused, the permitted one NOT yet tried.** Measured
+on air with an nRF52840 sniffer: 948 events over ~28.7 s = **30.3 ms**, matching
+`interval=24`. Requesting `12..24` (15–30 ms) changed nothing — macOS granted the range
+*maximum*. An earlier claim in fugu's `bleota.cpp` that a grant at the 15 ms floor was
+"worth ~2×" is refuted for *that* request.
+
+> **Correction, 2026-09-10 (codex review).** An earlier revision of this section claimed
+> QA1931 forbids Max < Min+15 ms with Min ≥ 15 ms, and concluded 15 ms was "unobtainable
+> by asking". **That is wrong.** QA1931 states the rule with an explicit exception:
+>
+> > Interval Min ≥ 15 ms (multiples of 15 ms)
+> > Interval Min + 15 ms ≤ Interval Max **(Interval Max == 15 ms is allowed)**
+>
+> So **Min = Max = 15 ms is expressly permitted**, and it was never requested — only
+> `12..24` was. Apple also says only that *some* devices scale a 15 ms request to 30 ms,
+> which is not a policy of always granting the maximum. The interval lever is **open and
+> untested**, not eliminated.
+> [QA1931](https://developer.apple.com/library/archive/qa/qa1931/_index.html), retrieved
+> 2026-09-10.
 
 **Chunk size does nothing, and host pacing is required.** Full host matrix:
 
@@ -359,11 +413,25 @@ which locates that difference on the **receiving** side, not the host.
 
 ### The model that fits
 
-**Throughput ≈ bytes-per-connection-event ÷ interval.** With the interval pinned at
-30 ms for both firmwares, the whole remaining gap is bytes per event. Sniffer, during a
-real transfer: 3210 packets × 251 B ≈ 805 kB over 948 events = **~850 B/event / 30 ms =
-28.3 kB/s**, against 27.97 measured. Events carry mean 11.76 packets and peak at 26, so
-the link has **substantial headroom** — the transfer is not filling the events it has.
+**Throughput ≈ bytes-per-connection-event ÷ interval.** The arithmetic: 3210 packets in
+the largest payload bucket × 251 B ≈ 805 kB over 948 events = **~850 B/event / 30 ms =
+28.3 kB/s**, against 27.97 measured. Events carry mean 11.76 packets and peak at 26.
+
+Three limits on how far that can be pushed, and they matter:
+
+- **The interval was measured on the node only.** fugu has no `onConnParamsUpdate` and
+  no interval print anywhere — the previous session states plainly that it had "zero
+  granted-interval evidence for its 40.7 kB/s runs". An earlier revision here said the
+  interval was "pinned at 30 ms for both firmwares"; that is **unsupported for fugu**.
+- **The capture came from a skip push** (`erase_ms=44`, `write_ms=272`), taken when USB
+  was dead and `app1` could not be erased — the session predicted the skip beforehand.
+  A skipping device drains faster and returns credits faster, so it fills events *more*
+  than a real write would. The air statistics are still informative; the headroom
+  reading is biased in the favourable direction.
+- **3210 is a bucket count, not 3210 packets of exactly 251 B.** The buckets are 64 bytes
+  wide, so dividing by 1402 writes gives an average over a selected bucket, not a
+  measured fragments-per-write. The arithmetic is right; reading it as a demonstrated
+  mechanism is **unverified**.
 
 ### Where it stands, and what is NOT established
 
