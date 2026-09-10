@@ -551,7 +551,18 @@ def cached_image(iid, extra_dirs=()):
 def build_tamp_payload(data, window=TAMP_WINDOW_BITS):
     """Compress a whole image with tamp. Raises ImportError without the package."""
     import tamp
-    return tamp.compress(data, window=window)
+    # The receiver's tamp 1.x decoder rejects the extended-format bit which
+    # tamp 2.x enables by default. Keep the original wire format explicitly.
+    try:
+        payload = tamp.compress(data, window=window, extended=False)
+    except TypeError as exc:
+        # Older encoders have no `extended` keyword and already emit 1.x.
+        if "unexpected keyword argument 'extended'" not in str(exc):
+            raise
+        payload = tamp.compress(data, window=window)
+    if not payload or payload[0] & 0x03:
+        raise OtaBleError("tamp encoder did not produce the receiver's legacy wire format")
+    return payload
 
 
 def build_delta_payload(base_path, data, *, verify=True, expect_base=None):

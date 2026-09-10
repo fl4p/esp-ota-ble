@@ -49,3 +49,6 @@ run_suite() {
 run_suite "erase strategy: sequential writes" -DOTA_BLE_SECTOR_SKIP=0
 run_suite "erase strategy: erase-ahead" -DOTA_BLE_SECTOR_SKIP=0 -DCONFIG_SPI_FLASH_YIELD_DURING_ERASE
 run_suite "erase strategy: skip identical sectors"
+
+# Encoder API compatibility and invalid legacy-wire output must fail the suite.
+python3 test/test_tamp_compat.py
