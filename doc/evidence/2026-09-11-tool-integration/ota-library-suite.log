@@ -1,0 +1,36 @@
+tamp: not found -- Tamp transform tests will be skipped (set TAMP_DIR to enable)
+src/ota_xform.cpp:34:25: warning: unused variable 'TAMP_WINDOW_SIZE' [-Wunused-const-variable]
+   34 | static constexpr size_t TAMP_WINDOW_SIZE = 1u << TAMP_WINDOW_BITS;
+      |                         ^~~~~~~~~~~~~~~~
+src/ota_xform.cpp:36:25: warning: unused variable 'XFORM_OUT_SLICE' [-Wunused-const-variable]
+   36 | static constexpr size_t XFORM_OUT_SLICE = 512;
+      |                         ^~~~~~~~~~~~~~~
+2 warnings generated.
+--- erase strategy: sequential writes
+ota_ble host tests
+all checks passed
+src/ota_xform.cpp:34:25: warning: unused variable 'TAMP_WINDOW_SIZE' [-Wunused-const-variable]
+   34 | static constexpr size_t TAMP_WINDOW_SIZE = 1u << TAMP_WINDOW_BITS;
+      |                         ^~~~~~~~~~~~~~~~
+src/ota_xform.cpp:36:25: warning: unused variable 'XFORM_OUT_SLICE' [-Wunused-const-variable]
+   36 | static constexpr size_t XFORM_OUT_SLICE = 512;
+      |                         ^~~~~~~~~~~~~~~
+2 warnings generated.
+--- erase strategy: erase-ahead
+ota_ble host tests
+all checks passed
+src/ota_xform.cpp:34:25: warning: unused variable 'TAMP_WINDOW_SIZE' [-Wunused-const-variable]
+   34 | static constexpr size_t TAMP_WINDOW_SIZE = 1u << TAMP_WINDOW_BITS;
+      |                         ^~~~~~~~~~~~~~~~
+src/ota_xform.cpp:36:25: warning: unused variable 'XFORM_OUT_SLICE' [-Wunused-const-variable]
+   36 | static constexpr size_t XFORM_OUT_SLICE = 512;
+      |                         ^~~~~~~~~~~~~~~
+2 warnings generated.
+--- erase strategy: skip identical sectors
+ota_ble host tests
+all checks passed
+.....
+----------------------------------------------------------------------
+Ran 5 tests in 0.000s
+
+OK

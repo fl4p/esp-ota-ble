@@ -1,0 +1,7 @@
+HCI reported_packet_bytes=27 reported_credits=8 host_packet_bytes=27 host_credits=8
+EXPERIMENTAL NONSTANDARD HCI packet override: reported=27 selected=251 credits=8
+BLE backend=bumble adapter=usb:2357:0604 mtu=517 max_write=512 chunk=495
+OTAB AUTH ok
+IDENTITY {"run": "app0", "slot": 1572864, "base": "96689e6acab4b8a9296d96813c553bea4162c8bf61d8650059036c9a796c3a38", "xforms": ["raw", "tamp", "delta"]}
+BLE transfer link: Connection.Parameters(connection_interval=12.5, peripheral_latency=0, supervision_timeout=2000.0, subrate_factor=1, continuation_number=0) PHY=ConnectionPHY(tx_phy=<Phy.LE_2M: 2>, rx_phy=<Phy.LE_2M: 2>)
+PROBE VERIFIED {"run": "app0", "slot": 1572864, "base": "96689e6acab4b8a9296d96813c553bea4162c8bf61d8650059036c9a796c3a38", "xforms": ["raw", "tamp", "delta"]}

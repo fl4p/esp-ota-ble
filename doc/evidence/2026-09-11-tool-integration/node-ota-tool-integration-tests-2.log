@@ -1,0 +1,82 @@
+connecting to farmnode-X ...
+ok   shared transport authenticates the supplied nonce
+  < OTAB AUTH ok
+ok   node routes settings to shared transport
+  node is uplinking: '<invitation>'
+  node runs app1, base aaaaaaaaaaaaaaaa, accepts raw,delta
+  CONFIRMED: the node is running the image that was pushed (aaaaaaaaaaaaaaaa...)
+ok   digest match confirms
+ok   digest match confirms [info calls]
+ok   digest match confirms [reconnect transport options]
+  node is uplinking: '<invitation>'
+  node runs app0, base bbbbbbbbbbbbbbbb, accepts raw
+  the node is running a DIFFERENT image (bbbbbbbbbbbbbbbb..., wanted aaaaaaaaaaaaaaaa...) - it has not rebooted yet, or the push was rejected and rolled back
+  node runs app0, base bbbbbbbbbbbbbbbb, accepts raw
+  the node is running a DIFFERENT image (bbbbbbbbbbbbbbbb..., wanted aaaaaaaaaaaaaaaa...) - it has not rebooted yet, or the push was rejected and rolled back
+  node runs app0, base bbbbbbbbbbbbbbbb, accepts raw
+  the node is running a DIFFERENT image (bbbbbbbbbbbbbbbb..., wanted aaaaaaaaaaaaaaaa...) - it has not rebooted yet, or the push was rejected and rolled back
+ok   different digest is not success
+  node is uplinking: '<invitation>'
+  node runs app0, base bbbbbbbbbbbbbbbb, accepts raw
+  the node is running a DIFFERENT image (bbbbbbbbbbbbbbbb..., wanted aaaaaaaaaaaaaaaa...) - it has not rebooted yet, or the push was rejected and rolled back
+  node runs app1, base aaaaaaaaaaaaaaaa, accepts raw
+  CONFIRMED: the node is running the image that was pushed (aaaaaaaaaaaaaaaa...)
+ok   retries until the digest appears
+ok   retries until the digest appears [info calls]
+  node is uplinking: '<invitation>'
+!! the node reports slot 1, but this run has no LoRaWAN baseline to compare it with and BLE could not confirm the image. Nothing can be concluded; check over USB.
+ok   no BLE and no baseline is inconclusive
+  node is uplinking: '<invitation>'
+!! the node cannot report its running slot, and no BLE window was granted. This tool CANNOT tell a successful push from a rolled-back one. Check over USB.
+ok   no BLE and no slot is inconclusive
+  node is uplinking: '<invitation>'
+  node runs app1, base none, accepts raw
+!! the node booted app1 where it ran app0, but this receiver reports no image digest - so that is A different image, not necessarily the one pushed. Nothing can be concluded; check over USB.
+ok   old receiver reporting no digest is inconclusive
+  node is uplinking: '<invitation>'
+  node runs app0, base none, accepts raw
+  still running app0 - it has not rebooted yet, or the image was rejected and rolled back
+  node runs app0, base none, accepts raw
+  still running app0 - it has not rebooted yet, or the image was rejected and rolled back
+  node runs app0, base none, accepts raw
+  still running app0 - it has not rebooted yet, or the image was rejected and rolled back
+ok   old receiver on the same partition keeps waiting
+ok   silence inside the window is False
+  node is uplinking: '<invitation>'
+!! the node reports slot 0, but this run has no LoRaWAN baseline to compare it with and BLE could not confirm the image. Nothing can be concluded; check over USB.
+ok   a slot with no baseline is never success
+  node is uplinking: '<invitation>'
+  node no answer to `info`
+  this receiver reports neither a digest nor a comparable partition; falling back to the slot report over LoRaWAN
+!! the node reports slot 1, but this run has no LoRaWAN baseline to compare it with and BLE could not confirm the image. Nothing can be concluded; check over USB.
+ok   no answer to info is inconclusive
+  node is uplinking: '<invitation>'
+  could not ask over BLE (no BLE device matching 'farmnode-X' found); retrying
+  could not ask over BLE (no BLE device matching 'farmnode-X' found); retrying
+ok   a failed BLE connect is retried, not concluded
+  node is uplinking: '<invitation>'
+  could not reopen a session to ask (no ACK); retrying
+  could not reopen a session to ask (no ACK); retrying
+ok   a failed session reopen is retried, not concluded
+  node is uplinking: '<invitation>'
+!! the node reports slot 1, but this run has no LoRaWAN baseline to compare it with and BLE could not confirm the image. Nothing can be concluded; check over USB.
+ok   no target digest cannot conclude
+  node is uplinking: '<invitation>'
+ok   a structural error is not swallowed
+  node is uplinking: '<invitation>'
+  node runs app1, base none, accepts raw
+  this receiver reports neither a digest nor a comparable partition; falling back to the slot report over LoRaWAN
+!! the node cannot report its running slot, and BLE could not confirm it either. This tool CANNOT tell a successful push from a rolled-back one. Check over USB.
+ok   no baseline and no digest cannot conclude
+ok   open_when_up: an available radio opens once
+  not advertising yet; waiting up to 12 s for the radio to come up
+ok   open_when_up: retries until the radio appears
+  not advertising yet; waiting up to 12 s for the radio to come up
+ok   open_when_up: releases every failed attempt
+ok   open_when_up: a refused nonce is not retried
+ok   open_when_up: a structural error is not waited out
+  not advertising yet; waiting up to 1 s for the radio to come up
+ok   open_when_up: exhaustion raises inside the budget
+ok   open_when_up: a transport failure releases
+
+all checks passed

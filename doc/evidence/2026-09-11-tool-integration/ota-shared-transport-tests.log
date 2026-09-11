@@ -1,0 +1,7 @@
+...........Executing <Task finished name='Task-47' coro=<TransportTests.test_guard_cost() done, defined at /Users/fab/o2p-push/ota-tools-integration/esp-ota-ble/test/test_transport.py:210> result=None created at /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/runners.py:110> took 0.128 seconds
+....
+----------------------------------------------------------------------
+Ran 15 tests in 0.165s
+
+OK
+write guard plus AsyncMock: 12.78 us/write

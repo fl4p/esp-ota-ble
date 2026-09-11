@@ -2,6 +2,8 @@
 
 Push a firmware image to an ESP32 over BLE, with no WiFi involved.
 
+Host tools: [shared transports, throughput controls and experimental options](doc/host-transports.md).
+
 This module is the **receiver only**, and it knows nothing about BLE: it is a staging ring, a
 credit-window flow-control scheme, a streaming SHA-256 and the `esp_ota_*` calls. The consumer owns
 the GATT layer and feeds bytes in. That split is why the same code serves an ESP-IDF firmware using

@@ -174,7 +174,7 @@ SCAN_SETTLE = 0.5
 
 
 async def find_device(name_prefix=None, address=None, service_uuid=None,
-                      timeout=8.0):
+                      timeout=8.0, *, scanner_cls=None, adapter=None):
     """One matching BLEDevice, or None.
 
     Matching is by advertised name prefix and/or service UUID. A receiver whose
@@ -192,9 +192,11 @@ async def find_device(name_prefix=None, address=None, service_uuid=None,
     claim) keep their fail-fast behaviour; that is why the default stays at 8 s.
     """
     from bleak import BleakScanner
+    BleakScanner = scanner_cls or BleakScanner
+    scan_args = {'adapter': adapter} if adapter else {}
 
     if address:
-        dev = await BleakScanner.find_device_by_address(address, timeout=timeout)
+        dev = await BleakScanner.find_device_by_address(address, timeout=timeout, **scan_args)
         if dev is None:
             raise OtaBleError("no BLE device at address %s" % address)
         return dev
@@ -223,7 +225,7 @@ async def find_device(name_prefix=None, address=None, service_uuid=None,
         if _matches(dev, adv):
             found.set()
 
-    scanner = BleakScanner(detection_callback=on_seen)
+    scanner = BleakScanner(detection_callback=on_seen, **scan_args)
     await scanner.start()
     try:
         if name_prefix or service_uuid:
@@ -410,7 +412,15 @@ class adapt_link(object):
 
     @property
     def chunk(self):
-        return self._chunk_override or usable_chunk(self._link.mtu)
+        if self._chunk_override:
+            return self._chunk_override
+        value = getattr(self._link, "chunk", None)
+        return value if value is not None else usable_chunk(self._link.mtu)
+
+    async def prepare_transfer(self):
+        prepare = getattr(self._link, "prepare_transfer", None)
+        if prepare is not None:
+            await prepare()
 
     @property
     def disconnected(self):
@@ -824,6 +834,9 @@ async def push_image(link, data, *, sha=None, cmd_prefix="", on_line=None,
     if not ready.is_set():
         raise OtaBleError("no OTAB READY within %.0f s" % ready_timeout)
 
+    prepare = getattr(link, "prepare_transfer", None)
+    if prepare is not None:
+        await prepare()
     chunk = link.chunk
     sent = 0
     while sent < total:

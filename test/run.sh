@@ -52,3 +52,5 @@ run_suite "erase strategy: skip identical sectors"
 
 # Encoder API compatibility and invalid legacy-wire output must fail the suite.
 python3 test/test_tamp_compat.py
+python3 test/test_transport.py
+python3 test/test_native_transport.py

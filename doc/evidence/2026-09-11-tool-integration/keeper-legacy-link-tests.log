@@ -1,0 +1,37 @@
+ok   one notification, one frame
+ok   a 202-byte reply reassembles from 20-byte notifications
+ok   ...and one byte at a time, prefix included
+ok   two frames in one notification are both delivered
+ok   a zero-length reply is delivered, not swallowed
+ok   an over-long declared length raises
+ok   the BlueZ MTU property is read from a (path, props) tuple
+ok     and through a Variant wrapper
+ok     and is None when BlueZ does not publish it
+ok     and None when there are no services at all
+ok     and the largest characteristic MTU is taken
+ok   a populated backend cache is used and named
+ok   the BlueZ property alone is enough
+   MTU: no source could report it; assuming the mandatory default 23
+ok   no source at all falls back to the mandatory 23, not an error
+   MTU: backend cache reported 9999, above the 517 maximum - clamping
+ok   an impossible MTU is clamped to the ATT maximum
+   MTU: backend cache reported 7, below the mandatory 23 - clamping
+ok   a sub-minimum MTU is clamped up to 23
+ok   a fresh link starts at 23 without consulting bleak's mtu_size
+ok   Bus.read works unchanged over the BLE link
+ok   Bus.write of a 249-byte ADU survives 20-byte BLE writes
+ok     and it really was chunked
+ok   at MTU 517 a 249-byte ADU is a SINGLE ATT write
+ok     and the ADU still arrives whole
+ok   usable_write clamps to the 512-octet attribute-value ceiling
+ok     which is BELOW the 514 that MTU-3 alone would allow
+ok   a mid-range MTU is still MTU-3
+ok   the floor is the 20 bytes any link must carry
+ok   and a nonsense MTU cannot produce a nonsense write
+ok   a silent probe raises rather than returning nothing
+ok   a dead link raises a timeout
+  < BUS FAIL bus not claimed - open the session with CTRL_F_CLAIM_BUS
+ok   a refusal is quoted in the error
+ok   an oversized ADU is refused before transmission
+
+31 checks, 0 failures

@@ -1,0 +1,16 @@
+c4085ea3177829af6423c569af9255a9570b6085288391621a8fe09487148448  doc/evidence/2026-09-11-tool-integration/README.md
+d61223bc888750133063f99475f395d1eee4d1629e99b1fcd4516713f7caa48e  doc/evidence/2026-09-11-tool-integration/check_transport_bench.py
+31914136220f12b23cfad38d7beda1fd645886e4a3234bfe5828d3ac8a7a7874  doc/evidence/2026-09-11-tool-integration/keeper-legacy-link-tests.log
+6249cc3a4d209c24138c495bdaf5d840def2a5d697e9ae056e2099f6d7ed1c2e  doc/evidence/2026-09-11-tool-integration/mac-native-final-probe.log
+a0dee72dc70385aecaadbeab473fde3060394c1a0bc2a9d54c83886d35c3b01f  doc/evidence/2026-09-11-tool-integration/mac-native-integrated-3.log
+e676ea243e5e61e0d28ccca6476579553f57ccfe3bcfb26d2b94376bea8d633a  doc/evidence/2026-09-11-tool-integration/node-ota-tool-integration-tests-2.log
+9a0ba01d5b27b9c260ea363d47f516ef2845ae10b97bed93b026f45e1eba3fd3  doc/evidence/2026-09-11-tool-integration/ota-library-suite.log
+5d6bd87903cd0317ac1d50854bec10a9ca9fdea086c3db76eb521058ba32269c  doc/evidence/2026-09-11-tool-integration/ota-shared-transport-tests.log
+1f50cc2e13ac748181291dad0537fffd1e686f9e028b6b962b3cde7d276d7ec8  doc/evidence/2026-09-11-tool-integration/rpi-bumble-integrated-probe-2.log
+0337abb0b793fa2f2552455992951767e0c523c7a4cef70bd1424c21a3169adb  doc/evidence/2026-09-11-tool-integration/rpi-bumble-integrated-probe.log
+f559c40bf3e68b88d9559c509286cd7092664b1a9d51991fafa80638744f40f1  doc/evidence/2026-09-11-tool-integration/rpi-bumble-usb-final-probe.log
+d5c62b81806bfbd930d782be50d4ea452b592762a592739303e2d5a0a06134fc  doc/evidence/2026-09-11-tool-integration/rpi-bumble-usb-integrated-probe.log
+a17876ccf34781ada0ae6e36540513b76285a0900dd68ada7616b007297735a1  host/esp_ota_ble.py
+9a9d2b1cb054956cbe4c141397aa5041252a342bd17d0ffa93f784299c86c415  host/esp_ota_ble_transport.py
+ef7c49e75fd31db3e848ee3a9edd7cc4a175121a7a69e05acdcfd9173fac4ccc  host/esp_ota_ble_native.py
+e29d6f2fe0ec03718ea7c212baedf8639482d149abc8de7890c7f6bbbffdb9a8  host/esp_ota_ble_native.swift

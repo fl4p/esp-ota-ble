@@ -1,0 +1,5 @@
+BLE backend=native adapter=default mtu=515 max_write=512 chunk=244
+OTAB AUTH ok
+IDENTITY {"run": "app0", "slot": 1572864, "base": "96689e6acab4b8a9296d96813c553bea4162c8bf61d8650059036c9a796c3a38", "xforms": ["raw", "tamp", "delta"]}
+PROBE VERIFIED {"run": "app0", "slot": 1572864, "base": "96689e6acab4b8a9296d96813c553bea4162c8bf61d8650059036c9a796c3a38", "xforms": ["raw", "tamp", "delta"]}
+Native BLE: {'event': 'disconnected', 'ready_callbacks': 0, 'writes': 0}

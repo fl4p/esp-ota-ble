@@ -1,0 +1,21 @@
+BLE backend=native adapter=default mtu=515 max_write=512 chunk=244
+OTAB AUTH ok
+IDENTITY {"run": "app0", "slot": 1572864, "base": "96689e6acab4b8a9296d96813c553bea4162c8bf61d8650059036c9a796c3a38", "xforms": ["raw", "tamp", "delta"]}
+Native BLE: {'event': 'disconnected', 'ready_callbacks': 0, 'writes': 0}
+Traceback (most recent call last):
+  File "/Users/fab/o2p-push/ota-tools-integration/check_transport_bench.py", line 98, in <module>
+    asyncio.run(main(ap.parse_args()))
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/runners.py", line 205, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/runners.py", line 128, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/base_events.py", line 720, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/Users/fab/o2p-push/ota-tools-integration/check_transport_bench.py", line 50, in main
+    if a.expect_base and before['base'] != a.expect_base: raise RuntimeError('unexpected receiver')
+                                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: unexpected receiver

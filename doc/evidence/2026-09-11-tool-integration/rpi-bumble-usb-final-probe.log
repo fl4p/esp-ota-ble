@@ -1,0 +1,35 @@
+!!! command result mismatch, expected 0x1001 but got 0xC03
+failed to probe local version information
+!!! command result mismatch, expected 0xC03 but got 0x1001
+!!! command result mismatch, expected 0x1002 but got 0xC03
+Traceback (most recent call last):
+  File "/home/fab/ota-tools-integration/check_transport_bench.py", line 105, in <module>
+    asyncio.run(main(ap.parse_args()))
+  File "/usr/lib/python3.11/asyncio/runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/asyncio/base_events.py", line 653, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/fab/ota-tools-integration/check_transport_bench.py", line 40, in main
+    link = await connect(a)
+           ^^^^^^^^^^^^^^^^
+  File "/home/fab/ota-tools-integration/check_transport_bench.py", line 22, in connect
+    dev = await link.find_device(name_prefix='farmnode-202A29', timeout=20)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/fab/ota-tools-integration/esp-ota-ble/host/esp_ota_ble_transport.py", line 142, in find_device
+    return await self.scan(O.find_device, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/fab/ota-tools-integration/esp-ota-ble/host/esp_ota_ble_transport.py", line 123, in scan
+    await self._keeper.acquire()
+  File "/home/fab/ota-throughput-20260911/bumble_bleak/_backend.py", line 215, in acquire
+    await self.device.power_on()
+  File "/home/fab/ota-throughput-20260911/venv/lib/python3.11/site-packages/bumble/device.py", line 2857, in power_on
+    await self.host.reset()
+  File "/home/fab/ota-throughput-20260911/venv/lib/python3.11/site-packages/bumble/host.py", line 354, in reset
+    response1.supported_commands, 'little'
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'HCI_StatusReturnParameters' object has no attribute 'supported_commands'
