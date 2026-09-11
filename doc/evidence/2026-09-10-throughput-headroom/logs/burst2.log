@@ -1,0 +1,19 @@
+Traceback (most recent call last):
+  File "/Users/fab/o2p-push/nodehead/tools/bench_ble_ota.py", line 132, in <module>
+    asyncio.run(run(ap.parse_args()))
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/runners.py", line 205, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/runners.py", line 128, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/base_events.py", line 720, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/Users/fab/o2p-push/nodehead/tools/bench_ble_ota.py", line 61, in run
+    link = await connect(args)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/Users/fab/o2p-push/nodehead/tools/bench_ble_ota.py", line 35, in connect
+    raise RuntimeError('bench device not found')
+RuntimeError: bench device not found

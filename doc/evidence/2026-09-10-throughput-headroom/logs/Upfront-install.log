@@ -1,0 +1,9 @@
+SETUP OTAB AUTH ok
+BEFORE {"base": "f408a9dc9eb8a54e57a26d1ae3792059e1bfdad8e5991003dc0ba0d7b5c51de0", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}
+LINK mtu=515 max_write=512 chunk=495
+delta against node_X.bin
+[0.164] OTAB RING 262144
+[0.164] OTAB READY part=app1 size=211735 xform=delta out=722032
+[14.566] OTAB STAT write_ms=14313 calls=105 erase_ms=9228 out=722032
+SETUP OTAB AUTH ok
+RESULT {"after": {"base": "8a97876266bfe24aaed3884cc7f3bd00d367c297a293fed75a7714fe363c59b2", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "before": {"base": "f408a9dc9eb8a54e57a26d1ae3792059e1bfdad8e5991003dc0ba0d7b5c51de0", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "burst": 1, "bytes": 722032, "chunk": 495, "elapsed": 15.607190374983475, "flash": {}, "image": "/Users/fab/o2p-push/ota-throughput-next/node_Upfront.bin", "image_kB_s": 46.26277905582122, "kB_s": 13.566503317559757, "name": "farmnode-202A29", "paced_writes": 427, "purpose": "install", "real_write": null, "setup": [], "skip": {}, "stats": {"calls": "105", "erase_ms": "9228", "out": "722032", "write_ms": "14313"}, "timing": {}, "transfer_hint": true, "verified": true, "wire": "delta", "wire_bytes": 211735}

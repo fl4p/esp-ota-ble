@@ -1,0 +1,14 @@
+SETUP OTAB AUTH ok
+SETUP BENCH interval requested; inspect link after settling
+SETUP BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2
+BEFORE {"base": "6901b9f82ceada11a6d6cea7cc3c2c55ae6359e1c928ef1dc8be7d059107119f", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}
+LINK mtu=515 max_write=512 chunk=495
+delta against node_Blocks2.bin
+[0.442] OTAB RING 262144
+[0.442] OTAB READY part=app0 size=243960 xform=delta out=757104
+[7.793] OTAB STAT write_ms=7166 calls=120 erase_ms=2165 out=757104
+[7.989] OTAB FLASH mode=blocks program_bytes=757104 erase_bytes=757760
+[7.989] OTAB TIME begin_ms=225 program_ms=4282 compare_us=0
+[7.989] OTAB OK rebooting
+SETUP OTAB AUTH ok
+RESULT {"after": {"base": "545e80b9a275b0a47d56fb3b60a3e772a9b688418e9a66baa855139e44e56b60", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "before": {"base": "6901b9f82ceada11a6d6cea7cc3c2c55ae6359e1c928ef1dc8be7d059107119f", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "burst": 1, "bytes": 757104, "chunk": 495, "elapsed": 8.80741412495263, "flash": {"erase_bytes": "757760", "mode": "blocks", "program_bytes": "757104"}, "image": "/tmp/node_Y.bin", "image_kB_s": 85.96212114688909, "kB_s": 27.699390143223468, "name": "farmnode-202A29", "negotiated_setup": ["OTAB AUTH ok", "BENCH interval requested; inspect link after settling", "BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2"], "paced_writes": 492, "payload_build_s": 0.41965724993497133, "purpose": "measure", "real_write": true, "setup": ["interval 8", "link"], "skip": {}, "stats": {"calls": "120", "erase_ms": "2165", "out": "757104", "write_ms": "7166"}, "timing": {"begin_ms": "225", "compare_us": "0", "program_ms": "4282"}, "transfer_hint": true, "verified": true, "wire": "delta", "wire_bytes": 243960}

@@ -1,0 +1,16 @@
+SETUP OTAB AUTH ok
+SETUP BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2
+SETUP BENCH BUFFERS msys1=50 size=256 msys2=24
+SETUP BENCH DLE tx=251 tx_us=17040 rx=251 rx_us=2120
+BEFORE {"base": "f400b7941031735a44ac503973fc69ec4b0c40e89b3c5f4945ac3fe94001f66b", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}
+LINK mtu=515 max_write=512 chunk=495
+[0.409] OTAB RING 262144
+[0.409] OTAB READY part=app1 size=754624 xform=raw out=754624
+[10.220] OTAB STAT write_ms=2408 calls=1205 erase_ms=2058 out=754624
+[10.409] OTAB SKIP kept=0 wrote=185 erases=11 erase_ms=2058
+[10.409] OTAB FLASH mode=internal program_bytes=754624 erase_bytes=757760
+[10.409] OTAB TIME begin_ms=227 program_ms=2397 compare_us=0
+[10.409] OTAB OK rebooting
+VERIFY RETRY RuntimeError('bench device not found')
+SETUP OTAB AUTH ok
+RESULT {"after": {"base": "f408a9dc9eb8a54e57a26d1ae3792059e1bfdad8e5991003dc0ba0d7b5c51de0", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "before": {"base": "f400b7941031735a44ac503973fc69ec4b0c40e89b3c5f4945ac3fe94001f66b", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "burst": 1, "bytes": 754624, "chunk": 495, "elapsed": 11.22851529205218, "flash": {"erase_bytes": "757760", "mode": "internal", "program_bytes": "754624"}, "image": "/tmp/node_X.bin", "image_kB_s": 67.20603573779175, "kB_s": 67.20603573779175, "name": "farmnode-202A29", "negotiated_setup": ["OTAB AUTH ok", "BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2", "BENCH BUFFERS msys1=50 size=256 msys2=24", "BENCH DLE tx=251 tx_us=17040 rx=251 rx_us=2120"], "paced_writes": 1523, "payload_build_s": 6.666057743132114e-06, "poll_s": null, "purpose": "measure", "real_write": true, "setup": ["link", "buffers", "dleinfo"], "skip": {"erase_ms": "2058", "erases": "11", "kept": "0", "wrote": "185"}, "stats": {"calls": "1205", "erase_ms": "2058", "out": "754624", "write_ms": "2408"}, "timing": {"begin_ms": "227", "compare_us": "0", "program_ms": "2397"}, "transfer_hint": true, "verified": true, "wire": "raw", "wire_bytes": 754624}

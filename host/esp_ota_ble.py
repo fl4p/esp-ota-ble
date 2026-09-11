@@ -279,13 +279,14 @@ class BleOtaLink:
             if text and self._on_line:
                 self._on_line(text)
 
-    async def open(self, device, attempts=3, settle_s=2.0):
+    async def open(self, device, attempts=3, settle_s=2.0, *, adapter=None):
         from bleak import BleakClient
 
         last = None
         for attempt in range(1, attempts + 1):
             self._cli = BleakClient(
-                device, disconnected_callback=lambda _: self.disconnected.set())
+                device, disconnected_callback=lambda _: self.disconnected.set(),
+                **({'adapter': adapter} if adapter else {}))
             try:
                 await self._cli.connect()
                 await self._cli.start_notify(self.notify_uuid,

@@ -1,0 +1,9 @@
+SETUP OTAB AUTH ok
+BEFORE {"base": "545e80b9a275b0a47d56fb3b60a3e772a9b688418e9a66baa855139e44e56b60", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}
+LINK mtu=515 max_write=512 chunk=495
+delta against node_Y.bin
+[0.166] OTAB RING 262144
+[0.167] OTAB READY part=app0 size=210728 xform=delta out=721424
+[8.771] OTAB STAT write_ms=1114 calls=409 erase_ms=44 out=721424
+SETUP OTAB AUTH ok
+RESULT {"after": {"base": "19ee4942881a9fcd451dcd23fed1a348e08d0676758d5552d8fcc31d60677cdd", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "before": {"base": "545e80b9a275b0a47d56fb3b60a3e772a9b688418e9a66baa855139e44e56b60", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "burst": 1, "bytes": 721424, "chunk": 495, "elapsed": 9.791096040979028, "image": "/tmp/node_Fast.bin", "kB_s": 21.522411701206124, "name": "farmnode-202A29", "paced_writes": 424, "real_write": null, "setup": [], "skip": {}, "stats": {"calls": "409", "erase_ms": "44", "out": "721424", "write_ms": "1114"}, "transfer_hint": true, "verified": true, "wire": "delta", "wire_bytes": 210728}

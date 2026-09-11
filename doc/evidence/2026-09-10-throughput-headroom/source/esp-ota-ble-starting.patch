@@ -1,0 +1,1756 @@
+diff --git a/README.md b/README.md
+index e2dc82a..fd66f4c 100644
+--- a/README.md
++++ b/README.md
+@@ -18,16 +18,47 @@ Control lines in (from the host), status lines out (to the host):
+ 
+ ```
+ host → device : begin <size> <sha256hex>   arm: pick the passive slot, quiesce, open the OTA handle
++                resume <off> <size> <sha>  arm at <off> instead of 0, continuing an interrupted push
+                 end                        finalize: verify length + digest, set boot slot, reboot
+                 abort                      tear down, leave the boot slot alone
+ 
+-device → host : OTAB READY part=<label> size=<n>
++device → host : OTAB READY part=<label> size=<n>            (+ ` from=<off>` on a resumed transfer)
+                 OTAB CRED <cumulative byte offset the host may stream up to>
+                 OTAB PROG <written>/<size>
++                OTAB RESUME <off> <size> | none             (part of the `info` reply)
+                 OTAB OK rebooting
+                 OTAB FAIL <reason>
+ ```
+ 
++## Resume
++
++A dropped link no longer costs the whole transfer. The receiver remembers the sector-aligned prefix
++it can prove is in the update slot, `info` advertises it as `OTAB RESUME <off> <size>`, and a
++`resume` naming the same offset, size and digest picks the transfer back up there.
++
++**The digest still covers the whole image, and it covers the bytes that will actually boot.** A
++resumed session re-hashes the already-flashed prefix by reading it back out of the slot rather than
++trying to carry a SHA-256 context across the drop — so a resume onto a prefix of a different build,
++a clobbered slot or a wrong offset all end at `OTAB FAIL sha-mismatch` with the boot partition
++untouched. Resume cannot splice two images; the worst it can do is waste a transfer.
++
++Raw only, and within a session or across a reconnect — not across a reboot. **`doc/resume.md` is the
++design note**: why the digest is recomputed rather than carried, why the offset is the receiver's
++number and not the host's, how the capability is negotiated in both directions, and what is
++explicitly out of scope.
++
++Host side:
++
++```python
++info = await O.query_info(link)
++xform, payload = O.choose_payload(image, info)
++off = O.resume_offset(info, payload, xform, on_note=print)   # 0 unless every check passes
++ok  = await O.push_image(link, payload, xform=xform, out_size=len(image), resume_from=off)
++```
++
++`push_image()` falls back to a fresh `begin` if the receiver refuses the resume for any reason at
++all, including being too old to know the command — which is what makes it safe to try.
++
+ Firmware bytes go on a separate write-without-response channel, chunked at the negotiated ATT MTU
+ minus 3, and the host must never stream past the most recent `CRED` offset. Violating that window
+ aborts immediately with `OTAB FAIL credit-overrun`; the producer callback only latches the failure,
+@@ -198,7 +229,9 @@ substantial `erase_ms` alone can conceal skipped tail sectors.
+ 
+ Host-native (clang++, ASan/UBSan), no hardware, and run three times — once per erase strategy, since
+ the two the default displaces are still reachable fallbacks and compiling only the default would
+-leave them unbuilt as well as untested.
++leave them unbuilt as well as untested. It then runs the two Python suites (stdlib only, no bleak,
++no radio), which cover the half of the protocol the C++ suite structurally cannot reach: what a
++**host** does when the receiver is the old one.
+ 
+ ESP-IDF is shimmed in `test/host-stub/`. The fake partition models *when* erases happen — begin-time
+ versus per-write — because that is the axis the `OTA_WITH_SEQUENTIAL_WRITES` choice turns on, and a
+@@ -245,6 +278,32 @@ its RX/TX characteristics. A transport this module does not know about — fugu
+ tunnels GATT through an ESPHome `bluetooth_proxy` — is wrapped with
+ `O.adapt_link(link)`.
+ 
++### What a `link` has to be
++
++`push_image()` and `query_info()` duck-type `link`, and the interface was being rediscovered by
++reading their bodies — fugu implements it twice, the farm node once. **`OtaLink` writes it down**:
++`set_line_handler`, `write_cmd`, `write_fw`, `chunk`, `disconnected` (an `asyncio.Event`), plus the
++optional `mtu` and `_on_line`. Nothing is enforced by inheritance; `require_link()` checks presence
++at the top of each call, so a link missing `disconnected` fails by name immediately rather than as
++an `AttributeError` on the failure path a hundred seconds into a transfer.
++
++### Helpers the consumer tools used to each carry
++
++Lifted 2026-09-10 from copies that had already diverged:
++
++* `read_local_app_desc(path_or_bytes)` — the version string from a `.bin`'s `esp_app_desc_t`.
++* `progress_bar(done, total, label)`.
++* `image_keeps_the_push_path(data, markers, mode="all"|"any")` — **the brick guard**. Does the image
++  you are about to push still contain the transport you would need to push the *next* one? Both
++  markers and quantifier are arguments, because the node needs *all* of `OTAB CRED`/`OTAB READY`
++  while fugu accepts *any* of a wider BLE-build marker set. An empty marker set or an unrecognised
++  mode raises rather than passing — `all(())` is `True`, and on a buried node this guard is the
++  difference between a bad build and a device that needs a cable.
++* `image_is_running(info, image)` — the *criterion* half of the post-push confirmation the module
++  tells every caller to do: `OTAB BASE` equals the image's own appended SHA-256, so it says *which*
++  image is running rather than merely that something rebooted. Tri-state; `None` means could not
++  tell and is not a success. The *waiting* stays in the callers, which have nothing in common there.
++
+ ### The reason it exists: `usable_chunk()`
+ 
+ **Sizing a firmware write is the one thing every copy of this code got wrong**,
+diff --git a/host/__pycache__/esp_ota_ble.cpython-314.pyc b/host/__pycache__/esp_ota_ble.cpython-314.pyc
+index aa00969..c178414 100644
+Binary files a/host/__pycache__/esp_ota_ble.cpython-314.pyc and b/host/__pycache__/esp_ota_ble.cpython-314.pyc differ
+diff --git a/host/esp_ota_ble.py b/host/esp_ota_ble.py
+index 28fdbd8..75f91bf 100644
+--- a/host/esp_ota_ble.py
++++ b/host/esp_ota_ble.py
+@@ -34,15 +34,20 @@ import platform
+ import re
+ import struct
+ import subprocess
++import sys
+ import tempfile
++import time
+ 
+ __all__ = [
+     "OtaBleError", "find_device", "BleOtaLink", "adapt_link", "usable_chunk",
+     "acquire_bluez_mtu",
+-    "push_image", "query_info",
++    "push_image", "query_info", "resume_offset", "image_is_running",
++    "OtaLink", "require_link",
+     "image_id", "build_tamp_payload", "build_delta_payload", "choose_payload",
+     "image_cache_dir", "cache_image", "cached_image",
++    "read_local_app_desc", "image_keeps_the_push_path", "progress_bar",
+     "TAMP_WINDOW_BITS", "DELTA_MAGIC", "DELTA_HEADER_SIZE",
++    "APP_DESC_MAGIC", "OTAB_RECEIVER_MARKERS",
+ ]
+ 
+ # The receiver's own status vocabulary (src/ota_ble.cpp).
+@@ -52,6 +57,9 @@ _RE_PROG = re.compile(r"OTAB PROG (\d+)/(\d+)")
+ _RE_INFO = re.compile(r"OTAB INFO run=(\S+) slot=(\d+)")
+ _RE_BASE = re.compile(r"OTAB BASE ([0-9a-fA-F]{64}|none)")
+ _RE_XFORM = re.compile(r"OTAB XFORM (\S+)")
++# "OTAB RESUME <wireOffset> <wireSize>" or "OTAB RESUME none". A receiver too old for resume emits
++# neither, and that absence is the capability test -- see resume_offset().
++_RE_RESUME = re.compile(r"OTAB RESUME (?:(\d+) (\d+)|none)")
+ 
+ _MACOS = platform.system() == "Darwin"
+ 
+@@ -245,6 +253,89 @@ async def find_device(name_prefix=None, address=None, service_uuid=None,
+     return hits[0] if hits else None
+ 
+ 
++class OtaLink:
++    """THE LINK CONTRACT: what push_image() and query_info() require of `link`.
++
++    They duck-type it, and that stays true -- nothing here is enforced by
++    inheritance, and a link need not subclass this. It is written down because
++    the interface was being rediscovered by reading push_image()'s body: fugu
++    implements it twice (`BleakLink` and its ESPHome-proxy transport) and the
++    farm node once (`NodeLink`), all independently, and a member that only the
++    failure path touches -- `disconnected` -- is easy to leave out and hard to
++    notice missing.
++
++    Required:
++
++      set_line_handler(fn)   Install fn(line: str) for every complete status
++                             line, newline stripped. Replaces any previous
++                             handler; the module installs its own for the
++                             duration of a call. A status line can straddle two
++                             notifications, so reassembly belongs in the link.
++      async write_cmd(text)  Send one control line. The link is responsible for
++                             the trailing newline if its transport needs one.
++      async write_fw(data)   Send firmware bytes, write-WITHOUT-response.
++      chunk                  int: the largest `data` write_fw() will take. See
++                             usable_chunk() -- getting this wrong corrupts the
++                             image silently in one direction and costs 25x
++                             throughput in the other.
++      disconnected           asyncio.Event, set when the link drops. push_image()
++                             waits on it alongside every timeout; a link without
++                             one turns every drop into a full timeout and reports
++                             the wrong cause.
++
++    Optional, but expected by anything that composes links:
++
++      mtu                    int. Not read by push_image() -- it uses `chunk` --
++                             but adapt_link() derives `chunk` from it.
++      _on_line               The currently installed handler. query_info()
++                             RESTORES rather than clears the caller's handler,
++                             and reads this to do it. A link without it still
++                             works; the caller's handler is simply not put back,
++                             which is silent until its own lines stop arriving.
++                             Both links in this module expose it.
++    """
++
++    #: What push_image() needs, in the form require_link() checks it.
++    REQUIRED = ("set_line_handler", "write_cmd", "write_fw", "chunk", "disconnected")
++    #: What query_info() needs. Deliberately smaller: it sends one command and reads the reply, and
++    #: demanding a firmware sink it never writes to would reject a perfectly good query-only link.
++    REQUIRED_INFO = ("set_line_handler", "write_cmd")
++
++    def set_line_handler(self, fn):
++        raise NotImplementedError
++
++    async def write_cmd(self, text):
++        raise NotImplementedError
++
++    async def write_fw(self, data):
++        raise NotImplementedError
++
++    @property
++    def chunk(self):
++        raise NotImplementedError
++
++    @property
++    def disconnected(self):
++        raise NotImplementedError
++
++
++def require_link(link, what="this call", members=OtaLink.REQUIRED):
++    """Fail a link that cannot carry a push, before it carries half of one.
++
++    Presence only -- this cannot check that write_fw() actually sends anything.
++    What it does buy is that a missing `disconnected` surfaces as a named error
++    at the start rather than as an AttributeError a hundred seconds into a
++    transfer, on the failure path, where it is easily misread as the device
++    misbehaving.
++    """
++    missing = [m for m in members if not hasattr(link, m)]
++    if missing:
++        raise OtaBleError("%s needs a link with %s (see OtaLink); %r provides none of those"
++                          % (what, ", ".join(missing), type(link).__name__))
++    if "disconnected" in members and not hasattr(link.disconnected, "is_set"):
++        raise OtaBleError("%s needs link.disconnected to be an asyncio.Event (see OtaLink)" % what)
++
++
+ class BleOtaLink:
+     """A connected receiver: one command channel, one notify, one firmware sink."""
+ 
+@@ -253,6 +344,11 @@ class BleOtaLink:
+         self.notify_uuid = notify_uuid
+         self.fw_uuid = fw_uuid
+         self._chunk_override = int(chunk or 0)
++        # False = not looked up yet; None = unavailable on this backend.
++        self._cb_periph = False
++        # Writes that had to wait for CoreBluetooth's queue. Zero across a whole
++        # push means the host never outran the link and the pacing cost nothing.
++        self.paced_writes = 0
+         self._cli = None
+         self.mtu = 23
+         # True only once we have made BlueZ report the negotiated MTU; gates the
+@@ -355,7 +451,68 @@ class BleOtaLink:
+         # transfer, and one acked write per command is free.
+         await self._cli.write_gatt_char(self.cmd_uuid, line, response=True)
+ 
++    def _cb_peripheral(self):
++        """CoreBluetooth's CBPeripheral for this link, or None off macOS.
++
++        Reached through bleak internals on purpose: there is no public API for
++        the flow-control question below, and the alternative to asking it is
++        losing firmware bytes silently. Every step is guarded, so a bleak whose
++        internals moved degrades to "no flow control" rather than to an
++        exception - the same behaviour as every non-CoreBluetooth backend.
++        """
++        if self._cb_periph is not False:
++            return self._cb_periph
++        self._cb_periph = None
++        try:
++            self._cb_periph = self._cli._backend._delegate.peripheral
++        except Exception:
++            pass
++        return self._cb_periph
++
++    async def _await_writable(self, budget_s=2.0):
++        """Block until CoreBluetooth will actually carry the next write.
++
++        WHY THIS EXISTS. A write-without-response is unacknowledged, and bleak's
++        CoreBluetooth backend hands it straight to
++        `writeValue_forCharacteristic_type_` with NO flow control at all - it
++        never consults `canSendWriteWithoutResponse` and never waits for
++        `peripheralIsReadyToSendWriteWithoutResponse:` (backends/corebluetooth/
++        PeripheralDelegate.py: the `else` branch is one unawaited call). Apple's
++        contract is that writes issued while that property is false MAY BE
++        DROPPED, and nothing upstream can see it happen: the coroutine returns,
++        the transfer looks healthy, and the device is simply short.
++
++        The credit window used to hide this. At 8 KB the host wrote ~16 packets
++        and then blocked on credit, which gave the queue time to drain; the
++        drops only appear once the window is large enough to let the host run.
++        See usable_chunk() for the BlueZ form of the same failure - there the
++        mitigation was a smaller chunk, here it is asking before writing.
++
++        A budget rather than an unbounded wait: if the property never comes back
++        true the link is dead or the API moved, and the credit/stall machinery
++        upstream is the right place to decide that, not a spin here.
++        """
++        p = self._cb_peripheral()
++        if p is None:
++            return
++        try:
++            if p.canSendWriteWithoutResponse():
++                return
++        except Exception:
++            self._cb_periph = None      # API moved; stop asking
++            return
++        self.paced_writes += 1          # how often the queue was actually full
++        deadline = time.monotonic() + budget_s
++        while time.monotonic() < deadline:
++            await asyncio.sleep(0.001)
++            try:
++                if p.canSendWriteWithoutResponse():
++                    return
++            except Exception:
++                return
++
+     async def write_fw(self, data):
++        await self._await_writable()
+         await self._cli.write_gatt_char(self.fw_uuid, data, response=False)
+ 
+     async def release(self):
+@@ -457,6 +614,89 @@ DELTA_MAGIC = 0xFCCDDE10
+ DELTA_HEADER_SIZE = 64
+ 
+ 
++# Magic of ESP-IDF's esp_app_desc_t (esp_app_format.h). The struct sits immediately after the
++# 24-byte image header plus the 8-byte first segment header, so it is always inside the first
++# 512 bytes of a .bin -- but it is FOUND rather than assumed at a fixed offset, because that layout
++# is a property of the bootloader's image format and not of this protocol.
++APP_DESC_MAGIC = 0xABCD5432
++
++
++def read_local_app_desc(image):
++    """The version string out of a local firmware image's esp_app_desc_t, or None.
++
++    `image` is a path or the image bytes. None means "could not read it" for
++    every reason -- missing file, not an ESP app image, no descriptor -- and
++    callers use it only to print what they are about to push next to what the
++    device says it is running. Do not build a decision on it: it is a label the
++    build wrote about itself, not a hash of anything.
++
++    Lifted 2026-09-10 from two byte-identical copies (fugu etc/ota_ble.py,
++    node tools/ota_ble_push.py) that had already diverged in spelling.
++    """
++    if isinstance(image, (bytes, bytearray)):
++        head = bytes(image[:0x200])
++    else:
++        try:
++            with open(image, "rb") as f:
++                head = f.read(0x200)
++        except OSError:
++            return None
++    off = head.find(struct.pack("<I", APP_DESC_MAGIC))
++    if off < 0:
++        return None
++    return head[off + 0x10:off + 0x30].split(b"\x00", 1)[0].decode("utf-8", "replace")
++
++
++# The receiver's own status lines, which are present in any image that still contains this module.
++# They are the default marker set because they are what a BLE push actually needs to exist on the
++# far side; a consumer whose transport needs more (a console, a BLE stack) passes its own.
++OTAB_RECEIVER_MARKERS = (b"OTAB CRED", b"OTAB READY")
++
++
++def image_keeps_the_push_path(data, markers=OTAB_RECEIVER_MARKERS, *, mode="all"):
++    """Would flashing this image over BLE destroy the path being used to flash it?
++
++    THE BRICK GUARD, generalised from `image_has_ota()` (node) and
++    `image_has_ble()` (fugu). Both asked the same question -- does the image I
++    am about to push still contain the transport I would need to push the NEXT
++    one? -- and differed only in the marker strings and the quantifier, so both
++    are parameters here rather than one project's answer hard-coded.
++
++    `mode` is "all" (every marker must be present; the strict default) or "any"
++    (one is enough, for a marker set where the markers are alternatives rather
++    than requirements). It is validated rather than defaulted: an unrecognised
++    mode raises, because the failure this guard prevents is a device buried in a
++    compost pile that can only be recovered with a cable.
++
++    An empty marker set raises for the same reason -- `all(...)` over nothing is
++    True, which would turn a mis-wired caller into a silent pass.
++    """
++    if mode not in ("all", "any"):
++        raise ValueError("mode must be 'all' or 'any', not %r" % (mode,))
++    markers = tuple(markers)
++    if not markers:
++        raise ValueError("image_keeps_the_push_path needs at least one marker")
++    quantifier = all if mode == "all" else any
++    return quantifier(sig in data for sig in markers)
++
++
++def progress_bar(done, total, label, width=30):
++    """One-line terminal progress bar, ending in a newline when it completes.
++
++    Here because both host tools had grown their own byte-for-byte copy. It
++    writes to stdout unconditionally; a caller that does not want that should
++    pass its own `on_progress` to push_image() instead of using this.
++    """
++    frac = done / total if total else 0
++    filled = int(frac * width)
++    sys.stdout.write("\r  %s [%s%s] %5.1f%% %d/%d"
++                     % (label, "#" * filled, "-" * (width - filled), frac * 100, done, total))
++    sys.stdout.flush()
++    if done >= total:
++        sys.stdout.write("\n")
++        sys.stdout.flush()
++
++
+ def image_id(data):
+     """The identity of an ESP32 app image: its own appended SHA-256.
+ 
+@@ -694,9 +934,18 @@ def choose_payload(data, info, *, prefer="auto", base_dirs=(), on_note=None):
+ async def query_info(link, *, cmd_prefix="", timeout=15.0):
+     """Ask the device what it is running and what payloads it accepts.
+ 
+-    Returns {"run", "slot", "base", "xforms"}, or None on an old receiver that
+-    does not know the command -- which is not an error, it just means raw.
++    Returns {"run", "slot", "base", "xforms", "resume_capable", "resume"}, or
++    None on an old receiver that does not know the command -- which is not an
++    error, it just means raw.
++
++    `resume_capable` is False when the receiver emitted no RESUME line at all,
++    which is how a receiver that predates resume identifies itself. `resume` is
++    then always None; on a receiver that does know the command it is None when
++    there is nothing to continue, and {"off", "size"} when there is. Feed it to
++    resume_offset() rather than reading it directly -- the decision needs the
++    payload as well.
+     """
++    require_link(link, "query_info", OtaLink.REQUIRED_INFO)
+     got = {}
+     seen = asyncio.Event()
+ 
+@@ -709,6 +958,11 @@ async def query_info(link, *, cmd_prefix="", timeout=15.0):
+         m = _RE_BASE.search(line)
+         if m:
+             got["base"] = None if m.group(1) == "none" else m.group(1).lower()
++        m = _RE_RESUME.search(line)
++        if m:
++            got["resume_capable"] = True
++            got["resume"] = (None if m.group(1) is None
++                             else {"off": int(m.group(1)), "size": int(m.group(2))})
+         m = _RE_XFORM.search(line)
+         if m:
+             got["xforms"] = tuple(m.group(1).split(","))
+@@ -732,12 +986,119 @@ async def query_info(link, *, cmd_prefix="", timeout=15.0):
+         link.set_line_handler(prev)
+     # XFORM is emitted last, so its absence means the reply never completed.
+     if "xforms" in got:
++        # Absence of a RESUME line is a FACT about the receiver, not a missing key. Defaulting it
++        # here rather than at every read site means a caller cannot accidentally treat "too old to
++        # resume" as "resume is available and empty".
++        got.setdefault("resume_capable", False)
++        got.setdefault("resume", None)
+         return got
+     return {"refused": True} if got.get("refused") else None
+ 
+ 
++def image_is_running(info, image):
++    """Is the device from that `info` reply running exactly `image`? True / False / None.
++
++    push_image() returning True is not proof the new image runs -- its own
++    docstring says so at length and then tells every caller to confirm out of
++    band, at which point fugu wrote one confirmation and the farm node wrote
++    another. This is the part of that job which belongs here: the CRITERION.
++
++    `OTAB BASE` is the running partition's own appended SHA-256, and image_id()
++    computes the same number from a local .bin without either side sending the
++    image. Equal means the device is running THIS build -- an identity, not an
++    inference. Compare that with the weaker checks the same code paths reach
++    for: "it advertised again" only shows something rebooted, "the slot number
++    changed" only shows something different booted, and an uptime comparison
++    shows nothing at all, because a REJECTED image reboots immediately and the
++    previous one comes up with uptime zero.
++
++    None is a third answer and not a soft False: no `info` reply, a device that
++    cannot hash its running partition (`OTAB BASE none`), or an image with no
++    appended hash to compare against. A caller must not report success on it.
++
++    What is deliberately NOT here: the waiting. fugu re-scans for an
++    advertisement, and the node waits for a LoRaWAN invitation, reopens a
++    session with a nonce and asks over the link the push just used. Those share
++    no code and no timing model, and flattening either into the other would cost
++    exactly the guarantee it was written for.
++    """
++    if not info:
++        return None
++    base = info.get("base")
++    if not base:
++        return None
++    want = image_id(image)
++    if want is None:
++        return None
++    return base.lower() == want.lower()
++
++
++def resume_offset(info, payload, xform="raw", *, enabled=True, on_note=None):
++    """Decide whether this push may continue an interrupted one, and from where.
++
++    Returns a wire offset to hand to push_image(resume_from=...), or 0 to start
++    fresh. Either way it says why through `on_note`, because "it resumed" and
++    "it started over" are both surprising if you expected the other one.
++
++    Every condition below must hold, and anything this function cannot
++    establish is answered "no". A resume is an optimisation; a wrong one costs
++    a whole transfer to discover, and the only thing standing between it and a
++    spliced image is a digest check at the far end of that transfer.
++
++      * the receiver said it can resume (it emitted an OTAB RESUME line at all),
++      * it has a transfer to continue (not "none"),
++      * the payload is raw -- under tamp or delta a wire offset is not an image
++        offset, and the device's transform state died with the session,
++      * the size it recorded is exactly this payload's size. That is what stops
++        a resume onto a prefix of a DIFFERENT build: the receiver additionally
++        requires the digest to match, and re-hashes the flashed prefix before
++        `end`, but the cheapest place to notice is here.
++
++    Note that the offset is the RECEIVER'S number, echoed back untouched. The
++    host does not get to choose where to restart -- it has no way to know what
++    reached flash, and the receiver refuses any offset but its own.
++
++    Callers that expose a `--no-resume` flag pass `enabled=False`; a forced
++    fresh push is the first thing to try when a resume behaves oddly.
++    """
++    def note(msg):
++        if on_note:
++            on_note(msg)
++
++    if not enabled:
++        note("resume: disabled, starting from 0")
++        return 0
++    if xform and xform != "raw":
++        note("resume: not defined for a %s payload, starting from 0" % xform)
++        return 0
++    if not info:
++        note("resume: the device did not answer `info`, starting from 0")
++        return 0
++    if not info.get("resume_capable"):
++        note("resume: this receiver predates resume, starting from 0")
++        return 0
++    r = info.get("resume")
++    if not r:
++        note("resume: the device holds no interrupted transfer")
++        return 0
++    off, size = r.get("off"), r.get("size")
++    if not isinstance(off, int) or not isinstance(size, int):
++        note("resume: the device's resume point did not parse, starting from 0")
++        return 0
++    if size != len(payload):
++        note("resume: the device holds %d bytes of a %d-byte transfer, this payload is %d "
++             "-- a different image, starting from 0" % (off, size, len(payload)))
++        return 0
++    if not 0 < off < size:
++        note("resume: offset %d is not inside a %d-byte payload, starting from 0" % (off, size))
++        return 0
++    note("resume: continuing at %d of %d bytes (%.0f %% already in the slot)"
++         % (off, size, 100.0 * off / size))
++    return off
++
++
+ async def push_image(link, data, *, sha=None, cmd_prefix="", on_line=None,
+-                     on_progress=None, xform=None, out_size=None,
++                     on_progress=None, xform=None, out_size=None, resume_from=0,
+                      ready_timeout=60.0, credit_timeout=20.0,
+                      credit_retries=3, flush_timeout=60.0, pace_s=0.0):
+     """Run `begin`/stream/`end` against an already-open link.
+@@ -756,7 +1117,15 @@ async def push_image(link, data, *, sha=None, cmd_prefix="", on_line=None,
+ 
+     The device grants credit and the host must never write past it; that is the
+     receiver's only flow control and its staging ring is what it protects.
++
++    `resume_from` continues an interrupted transfer at that wire offset instead
++    of beginning at 0. It must be the offset the receiver itself reported --
++    use resume_offset() to get it. A receiver that refuses the resume, for any
++    reason at all including being too old to know the command, is not an error:
++    this falls back to a fresh `begin` and the whole image goes over. That
++    fallback is why resume never has to be negotiated perfectly.
+     """
++    require_link(link, "push_image")
+     sha = sha or hashlib.sha256(data).hexdigest()
+     total = len(data)
+     state = {"granted": 0, "ok": False, "fail": None, "full": False}
+@@ -791,29 +1160,60 @@ async def push_image(link, data, *, sha=None, cmd_prefix="", on_line=None,
+ 
+     link.set_line_handler(handle)
+ 
+-    if xform and xform != "raw":
+-        if not out_size:
+-            raise OtaBleError("xform %r needs out_size (the reconstructed image size)" % xform)
+-        await link.write_cmd("%sbegin %d %s %s %d" % (cmd_prefix, total, sha, xform, out_size))
+-    else:
+-        # Byte-for-byte the original two-argument command, so a receiver that
+-        # predates transforms sees nothing new.
+-        await link.write_cmd("%sbegin %d %s" % (cmd_prefix, total, sha))
+-    # The wait is for a partition erase, not for a round trip.
+-    waits = [asyncio.create_task(ready.wait()),
+-             asyncio.create_task(done.wait()),
+-             asyncio.create_task(link.disconnected.wait())]
+-    await asyncio.wait(waits, timeout=ready_timeout,
+-                       return_when=asyncio.FIRST_COMPLETED)
+-    for t in waits:
+-        t.cancel()
+-    if state["fail"]:
+-        raise OtaBleError("device refused begin: %s" % state["fail"])
+-    if not ready.is_set():
+-        raise OtaBleError("no OTAB READY within %.0f s" % ready_timeout)
++    async def arm(cmd):
++        """Send one arming command and wait for READY. True if the device armed."""
++        await link.write_cmd(cmd)
++        # The wait is for a partition erase, not for a round trip.
++        waits = [asyncio.create_task(ready.wait()),
++                 asyncio.create_task(done.wait()),
++                 asyncio.create_task(link.disconnected.wait())]
++        await asyncio.wait(waits, timeout=ready_timeout,
++                           return_when=asyncio.FIRST_COMPLETED)
++        for t in waits:
++            t.cancel()
++        return ready.is_set()
++
++    if resume_from:
++        if xform and xform != "raw":
++            raise OtaBleError("resume is only defined for a raw payload, not %r" % xform)
++        if not 0 < resume_from < total:
++            raise OtaBleError("resume offset %d is not inside a %d-byte payload"
++                              % (resume_from, total))
++        if not await arm("%sresume %d %d %s" % (cmd_prefix, resume_from, total, sha)):
++            # Every refusal ends in the same place: a fresh push. `OTAB FAIL
++            # bad-command` is an old receiver, `resume-none` / `resume-mismatch`
++            # a new one that will not stand behind the prefix in its slot, and a
++            # silence is a lost reply -- none of them is a reason to fail a push
++            # that can simply send the whole image. The line is kept in the log
++            # because "it silently did not resume" is the confusing outcome.
++            if on_line:
++                on_line("resume refused (%s); starting from 0"
++                        % (state["fail"] or "no OTAB READY"))
++            state["fail"] = None
++            state["granted"] = 0
++            done.clear()
++            credit.clear()
++            resume_from = 0
++
++    if not resume_from:
++        if xform and xform != "raw":
++            if not out_size:
++                raise OtaBleError("xform %r needs out_size (the reconstructed image size)" % xform)
++            armed = await arm("%sbegin %d %s %s %d" % (cmd_prefix, total, sha, xform, out_size))
++        else:
++            # Byte-for-byte the original two-argument command, so a receiver that
++            # predates transforms sees nothing new.
++            armed = await arm("%sbegin %d %s" % (cmd_prefix, total, sha))
++        if state["fail"]:
++            raise OtaBleError("device refused begin: %s" % state["fail"])
++        if not armed:
++            raise OtaBleError("no OTAB READY within %.0f s" % ready_timeout)
+ 
+     chunk = link.chunk
+-    sent = 0
++    # The already-flashed prefix is not re-sent, and is not re-hashed here either: the receiver
++    # reads it back out of the slot to rebuild the digest, so `end` still checks a SHA-256 over the
++    # whole payload -- see doc/resume.md.
++    sent = resume_from
+     while sent < total:
+         if sent >= state["granted"]:
+             stalled = 0
+diff --git a/src/ota_ble.cpp b/src/ota_ble.cpp
+index b26532d..734d320 100644
+--- a/src/ota_ble.cpp
++++ b/src/ota_ble.cpp
+@@ -18,11 +18,84 @@
+ // Staging ring: otaBleStageBytes (producer/BLE host task) only copies bytes in here; otaBleTick
+ // (consumer) drains to flash. Decoupling keeps the slow esp_ota_write off the host task -- a stall
+ // there trips the BLE supervision timeout. Capacity doubles as the host's credit window.
+-// Kept small (8 KB): on a no-PSRAM board internal heap is tight and fragmented, and BLE throughput
+-// (~tens of KB/s) is far below what this window sustains, so the credit round-trip never bottlenecks.
+-static constexpr size_t RING_CAP = 8 * 1024;
++// Kept small (8 KB): on a no-PSRAM board internal heap is tight and fragmented.
++//
++// This used to add "so the credit round-trip never bottlenecks". IT DOES BOTTLENECK, and the
++// original claim was wrong. Measured 2026-09-10, farm node (ESP32-S3), one complete raw push from
++// macOS: 751 744 B in 108.58 s = 6.76 kB/s end to end, while the MIDDLE HALF of that same transfer
++// moved 375 808 B in 14.34 s = 25.59 kB/s. The device reported write_ms=7587 erase_ms=5531, so 13.1
++// s of the 108 s was flash. Roughly three quarters of the wall clock was neither link nor flash.
++//
++// The mechanism is this window, and it is working as designed: grantCredit() advances the host to
++// written + ringCap, where `written` counts bytes the CONSUMER has drained, so the host can never
++// run more than one window ahead of the flush. That makes the window a pacing mechanism whose throughput
++// is set by how promptly otaBleTick() is called -- not a bug, but not "never a bottleneck" either.
++//
++// On that node the cause was outside this module: the caller's loop also ran an RS-485 poll that
++// blocks for up to 1.5 s, and the push simply waited for it. The contract that follows from that is
++// documented on otaBleTick() in ota_ble.h, because a consumer has no other way to learn it.
++//
++// THE WINDOW IS SIZED AT RUNTIME, but the size that wins is still the small one - see the
++// measurements on RING_CAP_PSRAM below, which tried 256 KB on a board with 8 MB of PSRAM and came
++// out SLOWER than 8 KB once the host stopped losing writes. The runtime sizing is kept because it
++// is the mechanism a future measurement would need; the value is not an aspiration.
++//
++// RING_CAP_MIN is what a no-PSRAM board gets, and on today's evidence it is also the fast path.
++static constexpr size_t RING_CAP_MIN   = 8 * 1024;
++// PSRAM SIZING: THE MEASUREMENT THAT MATTERS IS A PUSH THAT ACTUALLY WRITES FLASH.
++//
++// This constant was set to 256 KB, then parked back at 8 KB on a comparison that was
++// CONFOUNDED, and the retraction is worth more than the number. Measured 2026-09-10, bench
++// ESP32-S3 with 8 MB PSRAM, 717 904-byte raw image, all runs complete and digest-verified.
++//
++// Re-pushing an image the slot ALREADY holds costs almost no flash: the sector-skip path
++// (see commitSector) keeps 175 of 176 sectors and erases one, `OTAB SKIP kept=175 wrote=1
++// erase_ms=45`. Those pushes measure the LINK and the comparison, not an OTA:
++//
++//     ring   8 KB   24.48 / 23.42 / 26.18 kB/s   (Mac)      kept=175 wrote=1
++//     ring 256 KB   15.31 kB/s                              kept=175 wrote=1
++//
++// A push that writes the whole slot - `erase_ms` near 8700, i.e. ~176 sector erases - is a
++// completely different machine, and it is the only one that says what an OTA costs:
++//
++//     ring   8 KB, no host flow control    1.88 kB/s
++//     ring   8 KB, host flow control       2.37 kB/s
++//     ring 256 KB, host flow control      12.88 kB/s   <-- 5.4x
++//
++// So the ring DOES decouple the link from flash, exactly as the argument above says, and the
++// earlier "8 KB wins" reading came from putting a real 256 KB push next to a no-op 8 KB one.
++// Flash is the bottleneck it removes, and flash only exists on a push that writes.
++//
++// STILL n=1 ON THE ROW THAT DECIDES IT. Before raising this, alternate two DIFFERENT images so
++// every push writes every sector, and read `OTAB SKIP` on each run to prove it did: a
++// throughput number from this bench is meaningless without the kept/wrote line beside it.
++// UN-PARKED 2026-09-10, and the row above is why: on a push that actually writes flash the
++// 256 KB ring is 5.4x the 8 KB one (12.88 vs 2.37 kB/s). Re-confirmed the same day on a
++// no-PSRAM build of the node, which reports `OTAB RING 8192` and measured 2.22 and 7.44 kB/s
++// on two identical real-write pushes - i.e. the 8 KB path is both slow AND wildly variable.
++// A board without PSRAM still gets RING_CAP_MIN; allocRing() falls back on its own.
++static constexpr size_t RING_CAP_PSRAM = 256 * 1024;
++static size_t ringCap = RING_CAP_MIN;             // set by allocRing(), never read before it runs
+ static constexpr size_t FLUSH_SLICE = 2048;       // flash-page-friendly esp_ota_write granularity
+-static constexpr size_t CRED_STEP = RING_CAP / 2; // re-grant credit in half-window steps (limits notifies)
++// HOW OFTEN CREDIT IS RE-ANNOUNCED, AND WHY IT IS CAPPED.
++//
++// This was ringCap/2, which is correct at 8 KB (announce every 4 KB) and a DEADLOCK at 256 KB.
++// MEASURED 2026-09-10, first bench run with the PSRAM-sized ring: the host was granted the whole
++// 256 KB up front, wrote exactly 262144 bytes into it in about six seconds, and then had to wait
++// for the next announcement - which needed the consumer to drain 128 KB before it would fire. The
++// device meanwhile saw NO INBOUND BYTES, because the host was correctly obeying its credit, and
++// killed the transfer with `OTAB FAIL stalled` on the 30 s no-bytes watchdog. Host waiting on
++// credit, device waiting on bytes: a deadlock that a small ring hid, because with a 4 KB step
++// credit always advanced long before the watchdog could fire.
++//
++// So the step is capped in ABSOLUTE terms rather than scaled to the window. 16 KB is eight
++// FLUSH_SLICE drains, so credit advances every few consumer ticks no matter how large the ring is,
++// while the notification rate stays far below the 8 KB ring's old one at 4 KB per step.
++static constexpr size_t CRED_STEP_MAX = 16 * 1024;
++static inline size_t credStep() {
++    size_t h = ringCap / 2;
++    return h < CRED_STEP_MAX ? h : CRED_STEP_MAX;
++}
+ // Four chances inside the host tools' 20 s credit wait, at only 12 idle notifications per minute.
+ static constexpr uint32_t CRED_REPEAT_MS = 5000;
+ // Matches the 30 s watchdog already used by the node consumer, now a backstop for every transport.
+@@ -115,6 +188,33 @@ static uint32_t secOff = 0;       // slot offset the buffer's first byte belongs
+ static uint32_t secFill = 0;
+ static uint32_t skSkipped = 0;    // sectors the slot already held
+ static uint32_t skWritten = 0;    // sectors erased and reprogrammed
++// Resume. A dropped link costs the whole transfer only because nothing remembers what already
++// reached flash: measured on a farm node 2026-09-10, a 751 744-byte raw push died at 175 104 bytes
++// and the retry started again at zero, on an operation that takes ~108 s and completes about half
++// the time.
++//
++// So remember. On every teardown of a raw session the receiver records the sector-aligned prefix it
++// can PROVE is in the update slot, together with the size and digest of the transfer that put it
++// there; `info` advertises it, and a `resume` command carrying the same three numbers picks the
++// transfer back up at that offset.
++//
++// Three things make that safe, and none of them is the record:
++//   * The record is only a hint about WHERE to restart. What authenticates the result is that a
++//     resumed session re-hashes the prefix OUT OF THE SLOT (see beginWithDigest), so `end` still
++//     checks a SHA-256 over the whole payload -- and over the bytes that will actually boot.
++//   * Only OtaXform::Raw is ever recorded. Under tamp or delta a wire offset is not an image
++//     offset and the transform's own state (window, patch decoder) died with the session, so there
++//     is nothing a byte offset could mean.
++//   * A fresh `begin` clears the record before it touches the slot, so a record never outlives the
++//     flash content it describes within a session.
++// It does NOT survive a reboot: the OTA handle does not, and neither do these.
++static const esp_partition_t *resPart = nullptr;
++static uint32_t resOff = 0;        // sector-aligned wire bytes provably in the slot
++static uint32_t resSize = 0;       // wire size of the transfer that put them there
++static uint8_t resSha[32];         // its digest -- a resume must name the same one
++static bool resValid = false;
++static bool resRecordable = false; // this session may leave a resume point behind
++static uint32_t flushed = 0;       // sector-aligned bytes committed to the slot this session
+ static uint32_t staged = 0;     // accepted from the producer; sampled by the stall watchdog
+ static uint32_t lastGranted = 0;
+ static uint32_t lastProg = 0;
+@@ -129,10 +229,11 @@ static OtaBleHooks hooks;
+ // Single-slot command latch. The protocol is strictly one command at a time -- the host always waits
+ // for a status line before sending the next -- so a second command arriving before the consumer has
+ // drained the first is a host bug, and is reported as one rather than silently overwriting.
+-enum class PendingCmd { None, Begin, End, Abort, Info };
++enum class PendingCmd { None, Begin, Resume, End, Abort, Info };
+ static PendingCmd pending = PendingCmd::None;
+ static uint32_t pendSize = 0;
+ static uint32_t pendOut = 0;
++static uint32_t pendOff = 0; // Resume only: where the host wants to carry on from
+ static OtaXform pendXform = OtaXform::Raw;
+ static uint8_t pendSha[32];
+ static std::mutex cmdMutex;
+@@ -178,8 +279,13 @@ static esp_err_t commitSector() {
+     // the first comparison can read it, so sector 0 never matches anyway -- removing the `off != 0`
+     // below changes no test outcome. It stays because the invariant it states is local, and the
+     // thing that actually enforces it today is the erase size of a call made a hundred lines away.
++    // A whole sector that reaches the slot -- by matching or by being programmed -- is the unit the
++    // resume point is measured in. Recorded only on the success paths, and only for a FULL sector:
++    // secOff above advances before the erase, so it names a sector this call has not committed yet,
++    // and the final partial sector is not a boundary a resumed transfer could restart on.
+     if (off != 0 && sectorMatches(off, secBuf, n)) {
+         ++skSkipped;
++        if (n == secSize) flushed = off + n;
+         return ESP_OK;
+     }
+     // A partial tail still erases its whole sector: the bytes past the image are not part of it,
+@@ -190,7 +296,10 @@ static esp_err_t commitSector() {
+     ++erCalls;
+     if (err != ESP_OK) return err;
+     err = esp_ota_write_with_offset(otaHandle, secBuf, n, off);
+-    if (err == ESP_OK) ++skWritten;
++    if (err == ESP_OK) {
++        ++skWritten;
++        if (n == secSize) flushed = off + n;
++    }
+     return err;
+ }
+ 
+@@ -279,11 +388,11 @@ static void freeRing() {
+ }
+ 
+ static void grantCredit() {
+-    // High-water mark: the host may stream up to (written + RING_CAP) cumulative bytes. Advance it as
+-    // flash drains; announce advances only in CRED_STEP jumps, while repeatCredit recovers a lost one.
+-    uint32_t g = written + RING_CAP;
++    // High-water mark: the host may stream up to (written + ringCap) cumulative bytes. Advance it as
++    // flash drains; announce advances only in credStep() jumps, while repeatCredit recovers a lost one.
++    uint32_t g = written + ringCap;
+     if (g > expectedSize) g = expectedSize;
+-    if (g >= lastGranted + CRED_STEP || g == expectedSize) {
++    if (g >= lastGranted + credStep() || g == expectedSize) {
+         lastGranted = g;
+         emit(OtaBleLevel::Info, "OTAB CRED %u", (unsigned) g);
+         creditRepeatArmed = false;
+@@ -301,6 +410,48 @@ static void repeatCredit(uint32_t nowMs) {
+     emit(OtaBleLevel::Info, "OTAB CRED %u", (unsigned) lastGranted);
+ }
+ 
++/// Consumer only. How many wire bytes of the current session this module is willing to swear are
++/// in the update slot, rounded down to an erase sector.
++///
++/// Rounding down is not caution about flash: esp_ota_write buffers a partial trailing chunk of its
++/// own under flash encryption, and a resumed transfer has to restart on a boundary it may erase.
++/// Every byte above the returned offset is re-sent, which costs link time and nothing else; a byte
++/// wrongly claimed below it would be spliced into the image unread. Only one of those is recoverable.
++static uint32_t durablePrefix() {
++    if (xform != OtaXform::Raw) return 0; // a wire offset is not an image offset under a transform
++    if (!otaPart) return 0;
++    const uint32_t esz = (uint32_t) otaPart->erase_size;
++    if (!esz) return 0;
++    // With the sector path this is exactly what commitSector reported; otherwise esp_ota_write owns
++    // the slot and imageWritten is what it was handed, so floor it.
++    const uint32_t off = secSize ? flushed : (imageWritten / esz) * esz;
++    if (off < esz) return 0;
++    // Leave the host at least one sector to send. A resume that has nothing left to stream never
++    // drains the ring, so the receiver never emits the final PROG the host waits for before `end`.
++    if (off >= expectedSize) return expectedSize > esz ? ((expectedSize - 1) / esz) * esz : 0;
++    return off;
++}
++
++/// Consumer only. Remember where an interrupted transfer got to, so the next one can carry on.
++/// Called on teardown; anything it cannot establish leaves no record at all, because a record is a
++/// promise about flash and a wrong one costs a whole transfer to discover.
++static void recordResumePoint() {
++    resValid = false;
++    if (!resRecordable) return;
++    if (xform != OtaXform::Raw) return;
++    // esp_ota_write_with_offset refuses any size that is not a multiple of 16 under encryption, and
++    // the resumed session writes through nothing else. Refusing here rather than at resume time
++    // means the host is never offered a restart the receiver could not honour.
++    if (esp_flash_encryption_enabled()) return;
++    const uint32_t off = durablePrefix();
++    if (!off) return;
++    resPart = otaPart;
++    resOff = off;
++    resSize = expectedSize;
++    memcpy(resSha, expectedSha, 32);
++    resValid = true;
++}
++
+ /// Consumer task. Answer "what are you running, and what can you accept?" -- everything a host
+ /// needs to decide between a delta, a compressed push and a raw one, before it commits to any.
+ /// Three short lines rather than one: a host still on the default 23-byte ATT MTU can only carry
+@@ -323,6 +474,17 @@ static void reportInfo() {
+         emit(OtaBleLevel::Warn, "OTAB BASE none");
+     }
+ 
++    // Before XFORM, which the host tools treat as the last line of the reply. It is also the whole
++    // capability negotiation: a receiver that predates resume emits no RESUME line, and a host that
++    // sees none does a fresh push -- exactly what it did before this existed. `none` is deliberately
++    // NOT silence: "I can resume but have nothing" and "I have never heard of resume" are different
++    // facts about the device, and only the first one is worth retrying against.
++    if (resValid && resPart && resPart == next) {
++        emit(OtaBleLevel::Info, "OTAB RESUME %u %u", (unsigned) resOff, (unsigned) resSize);
++    } else {
++        emit(OtaBleLevel::Info, "OTAB RESUME none");
++    }
++
+     char list[48];
+     int n = snprintf(list, sizeof(list), "raw");
+     if (otaXformAvailable(OtaXform::Tamp)) n += snprintf(list + n, sizeof(list) - n, ",tamp");
+@@ -330,12 +492,28 @@ static void reportInfo() {
+     emit(OtaBleLevel::Info, "OTAB XFORM %s", list);
+ }
+ 
+-void otaBleInit(const OtaBleHooks &h) { hooks = h; }
++void otaBleInit(const OtaBleHooks &h) {
++    hooks = h;
++    // A resume point is a claim about what is in the update slot right now. Init means the start of
++    // the world -- either a boot, where the claim died with the session that made it, or a consumer
++    // re-initialising, where this module has no idea what happened in between. Neither is a state
++    // in which an old claim is worth keeping.
++    resValid = false;
++    resRecordable = false;
++}
+ 
+ bool otaBleActive() { return active; }
+ 
+-static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, uint32_t outSize) {
++/// `resumeFrom` is 0 for a fresh transfer, or the wire offset a previously interrupted transfer of
++/// exactly this size and digest is to be continued from. Resume is raw-only and the caller has
++/// already checked the offset against the recorded one; see recordResumePoint().
++static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, uint32_t outSize,
++                            uint32_t resumeFrom = 0) {
+     if (active) { emit(OtaBleLevel::Warn, "OTAB FAIL already-active"); return false; }
++    // Whichever way this goes, the recorded prefix stops describing the slot the moment anything
++    // below erases it -- and a resume consumes its own record. Drop it here, before any of that.
++    resValid = false;
++    resRecordable = false;
+     otaPart = esp_ota_get_next_update_partition(nullptr);
+     if (!otaPart) { emit(OtaBleLevel::Warn, "OTAB FAIL no-partition"); return false; }
+     // The IMAGE has to fit the slot; that is the only size bound worth enforcing here. The wire
+@@ -348,9 +526,22 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, ui
+         return false;
+     }
+     if (size == 0) { emit(OtaBleLevel::Warn, "OTAB FAIL bad-size"); return false; }
+-    ring = (uint8_t *) heap_caps_malloc(RING_CAP, MALLOC_CAP_SPIRAM);
+-    if (!ring) ring = (uint8_t *) heap_caps_malloc(RING_CAP, MALLOC_CAP_DEFAULT); // PSRAM-less fallback
++    // PSRAM first and BIG; internal memory second and small. The fallback is the old behaviour
++    // exactly, so a no-PSRAM board is unaffected. ringCap is set from what was actually obtained -
++    // never from what was asked for, or a failed large allocation would leave the modulo arithmetic
++    // below indexing past the buffer.
++    ringCap = RING_CAP_PSRAM;
++    ring = (uint8_t *) heap_caps_malloc(ringCap, MALLOC_CAP_SPIRAM);
++    if (!ring) {
++        ringCap = RING_CAP_MIN;
++        ring = (uint8_t *) heap_caps_malloc(ringCap, MALLOC_CAP_SPIRAM);
++    }
++    if (!ring) {
++        ringCap = RING_CAP_MIN;
++        ring = (uint8_t *) heap_caps_malloc(ringCap, MALLOC_CAP_DEFAULT); // PSRAM-less fallback
++    }
+     if (!ring) { emit(OtaBleLevel::Warn, "OTAB FAIL no-mem"); return false; }
++    emit(OtaBleLevel::Info, "OTAB RING %u", (unsigned) ringCap);
+ 
+     memcpy(expectedSha, sha, 32);
+     quiesce(true); // free the CPU/flash for the erase + writes before anything touches the partition
+@@ -376,7 +567,59 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, ui
+     otaHandle = 0;
+     erasedTo = eraseTarget = 0;
+     skSkipped = skWritten = 0;
+-    [[maybe_unused]] const uint32_t esz = (uint32_t) otaPart->erase_size;
++    const uint32_t esz = (uint32_t) otaPart->erase_size;
++
++    if (resumeFrom) {
++        // Resume owns the slot through the sector path whether or not skip-identical is this
++        // build's default strategy. That is not a preference: esp_ota_write_with_offset is the only
++        // writer here that can start anywhere but zero, and it never erases for you, so the
++        // per-sector erase+program in commitSector is the only thing that can put the tail down.
++        // The sector buffer is therefore mandatory, not an optimisation, and its absence refuses
++        // the resume rather than failing the push -- the host still has a fresh `begin`.
++        if (esz < CMP_WINDOW || esz > 8192) {
++            emit(OtaBleLevel::Warn, "OTAB FAIL resume-sector");
++            freeRing();
++            quiesce(false);
++            return false;
++        }
++        secBuf = (uint8_t *) heap_caps_malloc(esz, MALLOC_CAP_SPIRAM);
++        if (!secBuf) secBuf = (uint8_t *) heap_caps_malloc(esz, MALLOC_CAP_DEFAULT);
++        if (!secBuf) {
++            emit(OtaBleLevel::Warn, "OTAB FAIL resume-no-mem");
++            freeRing();
++            quiesce(false);
++            return false;
++        }
++        // Sector 0 has to be rescued BEFORE esp_ota_begin. One sector is the smallest erase that
++        // still leaves need_erase == false -- which is what hands this module every later erase --
++        // and that sector is the head of the prefix we are resuming on top of. Read it out, let
++        // begin erase it, put it straight back. The rewrite is not only about the bytes: esp_ota_end
++        // refuses a handle nothing was ever written through, and a resume near the end of an image
++        // may otherwise write very little.
++        if (esp_partition_read(otaPart, 0, secBuf, esz) != ESP_OK) {
++            emit(OtaBleLevel::Warn, "OTAB FAIL resume-read");
++            freeRing();
++            quiesce(false);
++            return false;
++        }
++        esp_err_t rerr = esp_ota_begin(otaPart, esz, &otaHandle);
++        if (rerr != ESP_OK) {
++            emit(OtaBleLevel::Warn, "OTAB FAIL esp_ota_begin %s", esp_err_to_name(rerr));
++            if (otaHandle) { esp_ota_abort(otaHandle); otaHandle = 0; }
++            freeRing();
++            quiesce(false);
++            return false;
++        }
++        rerr = esp_ota_write_with_offset(otaHandle, secBuf, esz, 0);
++        if (rerr != ESP_OK) {
++            emit(OtaBleLevel::Warn, "OTAB FAIL resume-write %s", esp_err_to_name(rerr));
++            esp_ota_abort(otaHandle);
++            otaHandle = 0;
++            freeRing();
++            quiesce(false);
++            return false;
++        }
++    } else {
+ 
+     // Strategy, first refusal to skip-identical-sectors. It subsumes the other two: it removes
+     // flash work rather than rescheduling it, and it does so under every transform, because it
+@@ -452,6 +695,7 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, ui
+         quiesce(false);
+         return false;
+     }
++    } // end of the fresh-transfer strategy selection; a resume opened its own handle above
+     // A delta patch names the base it was built against. Hash the running image now so the
+     // transform can reject a patch aimed at a different one -- the digest is over 1.7 MB of flash,
+     // but it is read once per session and only when a delta actually asked for it.
+@@ -483,12 +727,56 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, ui
+ 
+     mbedtls_sha256_init(&shaCtx);
+     mbedtls_sha256_starts(&shaCtx, 0); // 0 = SHA-256
++    if (resumeFrom) {
++        // THE DIGEST DECISION, and the whole reason a resume is safe.
++        //
++        // `end` verifies a SHA-256 over the entire wire payload, and the prefix that already
++        // reached flash was hashed by a session that no longer exists. There are two ways to keep
++        // that check honest: carry the hash state across the drop, or recompute it. This recomputes
++        // it, by READING THE PREFIX BACK OUT OF THE UPDATE SLOT -- which is strictly the stronger
++        // of the two, because the bytes in the slot are the bytes that will boot. A carried-over
++        // hash state would only re-prove what the link delivered into RAM last time and would say
++        // nothing about what survived in flash.
++        //
++        // What this buys, concretely: a resume onto a slot holding a prefix of some OTHER build, a
++        // slot clobbered in between, a wrong offset, or a truncated write all end at `end` with
++        // OTAB FAIL sha-mismatch, an abort, and a boot partition that never moved. Resume cannot
++        // splice two images together; the worst it can do is waste a transfer.
++        //
++        // Raw only, so the wire prefix and the slot prefix are the same bytes. Sector 0 comes from
++        // the buffer because esp_ota_begin has already erased it in flash.
++        mbedtls_sha256_update(&shaCtx, secBuf, esz);
++        bool readErr = false;
++        for (uint32_t o = esz; o < resumeFrom;) {
++            const uint32_t n = std::min<uint32_t>(esz, resumeFrom - o);
++            if (esp_partition_read(otaPart, o, secBuf, n) != ESP_OK) { readErr = true; break; }
++            mbedtls_sha256_update(&shaCtx, secBuf, n);
++            o += n;
++        }
++        if (readErr) {
++            // Unreadable slot: there is no prefix to build on, so there is no resume. Not a
++            // downgrade to "hash what we can" -- an unevaluable check is never permission.
++            emit(OtaBleLevel::Warn, "OTAB FAIL resume-read");
++            mbedtls_sha256_free(&shaCtx);
++            otaXformEnd();
++            esp_ota_abort(otaHandle);
++            otaHandle = 0;
++            freeRing();
++            quiesce(false);
++            return false;
++        }
++        secSize = esz; // arms the sector path in xformSink, whatever the build default is
++        secOff = resumeFrom;
++        secFill = 0;
++    }
+     rHead = rTail = rCount = 0;
+     xform = x;
+     expectedSize = size;
+     expectedOut = outSize;
+-    imageWritten = 0;
+-    written = staged = lastGranted = lastProg = 0;
++    imageWritten = resumeFrom;
++    written = resumeFrom;
++    flushed = resumeFrom;
++    staged = lastGranted = lastProg = 0;
+     sinkFailed = false;
+     wrUs = 0; wrCalls = wrSlowCalls = wrMaxUs = 0;
+     erUs = erCalls = 0;
+@@ -497,12 +785,38 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, ui
+     creditRepeatArmed = false;
+     stallArmed = false;
+     active = true;
+-    emit(OtaBleLevel::Info, "OTAB READY part=%s size=%u xform=%s out=%u",
+-         otaPart->label, (unsigned) size, otaXformName(x), (unsigned) outSize);
++    resRecordable = true;
++    // READY stays byte-for-byte what it was for a fresh transfer; a resumed one appends where it
++    // picked up. Every host matches on the prefix, so the extra field costs nothing and a log that
++    // does not say "from=" is a transfer that really did start at zero.
++    if (resumeFrom) {
++        emit(OtaBleLevel::Info, "OTAB READY part=%s size=%u xform=%s out=%u from=%u",
++             otaPart->label, (unsigned) size, otaXformName(x), (unsigned) outSize,
++             (unsigned) resumeFrom);
++    } else {
++        emit(OtaBleLevel::Info, "OTAB READY part=%s size=%u xform=%s out=%u",
++             otaPart->label, (unsigned) size, otaXformName(x), (unsigned) outSize);
++    }
+     grantCredit();
+     return true;
+ }
+ 
++bool otaBleResume(uint32_t offset, uint32_t size, const char *sha256hex) {
++    uint8_t sha[32];
++    if (!sha256hex || strlen(sha256hex) != 64 || parseHex32(sha256hex, sha) != 0) {
++        emit(OtaBleLevel::Warn, "OTAB FAIL bad-sha");
++        return false;
++    }
++    // The offset is the receiver's own number, echoed back. Accepting the host's instead would let
++    // a stale tool restart at an offset nothing ever wrote.
++    if (!resValid || offset != resOff || size != resSize || memcmp(sha, resSha, 32) != 0 ||
++        resPart != esp_ota_get_next_update_partition(nullptr)) {
++        emit(OtaBleLevel::Warn, "OTAB FAIL resume-mismatch");
++        return false;
++    }
++    return beginWithDigest(size, sha, OtaXform::Raw, size, offset);
++}
++
+ bool otaBleBegin(uint32_t size, const char *sha256hex, const char *xformName, uint32_t outSize) {
+     uint8_t sha[32];
+     if (!sha256hex || strlen(sha256hex) != 64 || parseHex32(sha256hex, sha) != 0) {
+@@ -521,14 +835,14 @@ void otaBleStageBytes(const uint8_t *data, size_t len) {
+     if (!len) return;
+     std::lock_guard<std::mutex> lk(ringMutex);
+     if (!active || failed || !ring) return; // re-check under lock: consumer teardown frees ring here too
+-    if (len > RING_CAP - rCount) { // host overran its credit window -- consumer reports + aborts
++    if (len > ringCap - rCount) { // host overran its credit window -- consumer reports + aborts
+         failed = true;
+         return;
+     }
+-    size_t first = std::min(len, RING_CAP - rHead);
++    size_t first = std::min(len, ringCap - rHead);
+     memcpy(ring + rHead, data, first);
+     if (len > first) memcpy(ring, data + first, len - first);
+-    rHead = (rHead + len) % RING_CAP;
++    rHead = (rHead + len) % ringCap;
+     rCount += len;
+     staged += len;
+ }
+@@ -549,13 +863,35 @@ static bool abortIfOverrun() {
+ 
+ static bool abortIfStalled(uint32_t nowMs) {
+     uint32_t stagedNow;
++    size_t   countNow;
+     {
+         std::lock_guard<std::mutex> lk(ringMutex);
+         if (!active) return false;
+         stagedNow = staged;
++        countNow  = rCount;
+     }
+-    if (!stallArmed || stagedNow != stallMark) {
+-        stallMark = stagedNow;
++    /* PROGRESS IS EITHER SIDE MOVING, NOT JUST BYTES ARRIVING.
++     *
++     * This watched `staged` alone - bytes the producer has taken from the link.
++     * That is the right measure for a peer that vanished mid-transfer, and the
++     * wrong one at the END of a healthy transfer: once the host has sent the
++     * last byte there is nothing left to arrive, `staged` stops by definition,
++     * and the consumer still has a whole ring to drain to flash. The watchdog
++     * then killed a transfer that was progressing normally.
++     *
++     * MEASURED 2026-09-10, bench board with the 256 KB PSRAM ring: all 711 904
++     * bytes reached the device (elapsed 109 s, 6.38 kB/s, first quarter
++     * 28.27 kB/s) and the push still ended `OTAB FAIL stalled`, because
++     * draining the tail of a large ring takes longer than STALL_MS with no
++     * inbound bytes to refresh the mark. An 8 KB ring hid this: its tail drains
++     * in milliseconds.
++     *
++     * So the mark is staged AND written. Either advancing means the transfer is
++     * alive; only both stopping for STALL_MS is a real stall - which is exactly
++     * what a vanished peer looks like, so the original purpose is preserved. */
++    const uint32_t progressNow = stagedNow + written;
++    if (!stallArmed || progressNow != stallMark) {
++        stallMark = progressNow;
+         stallAt = nowMs;
+         stallArmed = true;
+         return false;
+@@ -563,7 +899,12 @@ static bool abortIfStalled(uint32_t nowMs) {
+     if (nowMs - stallAt < STALL_MS) return false;
+     // A disappeared peer cannot finish an open handle. Bounding this state also bounds how long a
+     // consumer's quiesce hook can leave its sampler or power stage halted after a missed disconnect.
+-    emit(OtaBleLevel::Warn, "OTAB FAIL stalled");
++    // The counts are the whole diagnosis of a stall, and guessing them from PROG is how the
++    // 256 KB ring got mis-blamed on the drain path: `staged` short of the size the host says it
++    // sent means the LINK dropped writes, while staged == size with rCount > 0 means the consumer
++    // really is not draining. One line settles which, months later, from a log.
++    emit(OtaBleLevel::Warn, "OTAB FAIL stalled staged=%u written=%u ring=%u/%u",
++         (unsigned) stagedNow, (unsigned) written, (unsigned) countNow, (unsigned) ringCap);
+     otaBleAbort();
+     return true;
+ }
+@@ -597,10 +938,10 @@ static bool drainRing() {
+             std::lock_guard<std::mutex> lk(ringMutex);
+             n = std::min(rCount, (size_t) FLUSH_SLICE);
+             if (n == 0) break;
+-            size_t first = std::min(n, RING_CAP - rTail);
++            size_t first = std::min(n, ringCap - rTail);
+             memcpy(slice, ring + rTail, first);
+             if (n > first) memcpy(slice + first, ring, n - first);
+-            rTail = (rTail + n) % RING_CAP;
++            rTail = (rTail + n) % ringCap;
+             rCount -= n;
+         }
+         // Transform + flash write happen outside the lock so the producer's stage call never blocks
+@@ -645,7 +986,7 @@ void otaBleTick(uint32_t nowMs) {
+     // Latched commands run here, never on the producer task: begin and end block on flash for far
+     // longer than a BLE host callback may.
+     PendingCmd cmd;
+-    uint32_t size, outSize;
++    uint32_t size, outSize, off;
+     OtaXform x;
+     uint8_t sha[32];
+     {
+@@ -653,12 +994,21 @@ void otaBleTick(uint32_t nowMs) {
+         cmd = pending;
+         size = pendSize;
+         outSize = pendOut;
++        off = pendOff;
+         x = pendXform;
+         memcpy(sha, pendSha, 32);
+     }
+     if (cmd != PendingCmd::None) {
+         switch (cmd) {
+             case PendingCmd::Begin: beginWithDigest(size, sha, x, outSize); break;
++            // Re-checked inside, not merely at submit: the record could have been dropped by
++            // anything that ran between the two, and the offset decides where bytes land.
++            case PendingCmd::Resume: {
++                char hex[65];
++                for (int i = 0; i < 32; ++i) snprintf(hex + i * 2, 3, "%02x", sha[i]);
++                otaBleResume(off, size, hex);
++                break;
++            }
+             case PendingCmd::End:   otaBleEnd(); break; // reboots and does not return, on success
+             case PendingCmd::Abort: otaBleAbort(); break;
+             case PendingCmd::Info:  reportInfo(); break;
+@@ -671,7 +1021,8 @@ void otaBleTick(uint32_t nowMs) {
+             // however, replace Begin with Abort while the slow begin is executing; honour it after
+             // begin returns rather than letting beginWithDigest's stale-abort reset erase it.
+             std::lock_guard<std::mutex> lk(cmdMutex);
+-            cancelStartedBegin = cmd == PendingCmd::Begin && pending == PendingCmd::Abort;
++            cancelStartedBegin = (cmd == PendingCmd::Begin || cmd == PendingCmd::Resume) &&
++                                 pending == PendingCmd::Abort;
+             pending = PendingCmd::None;
+         }
+         if (cancelStartedBegin && active) { otaBleAbort(); return; }
+@@ -705,6 +1056,11 @@ bool otaBleEnd() {
+     if (!drainRing()) return false; // drain whatever is still staged; false = aborted on a write error
+     if (abortIfOverrun()) return false;
+ 
++    // Past this point the transfer is complete as far as the host is concerned, and every remaining
++    // exit is a verdict on the whole payload -- too short, wrong digest, unreconstructable, refused
++    // by esp_ota_end. None of those is a link problem, so none of them leaves a resume point: a
++    // host that retried onto one would spend a full transfer rediscovering the same verdict.
++    resRecordable = false;
+     if (written != expectedSize) {
+         emit(OtaBleLevel::Warn, "OTAB FAIL incomplete %u/%u", (unsigned) written, (unsigned) expectedSize);
+         otaBleAbort();
+@@ -783,7 +1139,7 @@ void otaBleRequestAbort() {
+     // otaBleTick catches the replacement without holding cmdMutex across flash work.
+     {
+         std::lock_guard<std::mutex> lk(cmdMutex);
+-        if (pending == PendingCmd::Begin) {
++        if (pending == PendingCmd::Begin || pending == PendingCmd::Resume) {
+             pending = PendingCmd::Abort;
+             return;
+         }
+@@ -796,6 +1152,10 @@ void otaBleRequestAbort() {
+ 
+ void otaBleAbort() {
+     if (!active) return;
++    // Before freeRing(), which clears the sector bookkeeping this reads. An abort is the ONLY place
++    // a resume point is born: a transfer that reached `end` either installed or was rejected, and
++    // neither leaves a prefix worth continuing.
++    recordResumePoint();
+     { std::lock_guard<std::mutex> lk(ringMutex); active = false; freeRing(); }
+     otaXformEnd();
+     if (otaHandle) { esp_ota_abort(otaHandle); otaHandle = 0; }
+@@ -820,7 +1180,7 @@ OtaBleSubmit otaBleSubmitCommand(const char *line) {
+     while (*line == ' ') ++line;
+ 
+     PendingCmd cmd;
+-    uint32_t size = 0, outSize = 0;
++    uint32_t size = 0, outSize = 0, off = 0;
+     OtaXform x = OtaXform::Raw;
+     uint8_t sha[32];
+ 
+@@ -860,6 +1220,34 @@ OtaBleSubmit otaBleSubmitCommand(const char *line) {
+         }
+         size = (uint32_t) parsedSize;
+         cmd = PendingCmd::Begin;
++    } else if (strncmp(line, "resume", 6) == 0 && (line[6] == ' ' || line[6] == '\0')) {
++        // "resume <wireOffset> <wireSize> <wireSha256hex>" -- carry on an interrupted RAW transfer.
++        // A separate verb rather than a fifth field on `begin`, so `begin` stays byte-for-byte the
++        // command every existing receiver and host already agree on.
++        //
++        // All three numbers must match what this receiver recorded, and the offset is its own
++        // number echoed back rather than a position the host chose. That is deliberately stricter
++        // than it needs to be: the digest check at `end` would catch a wrong resume anyway, but
++        // only after spending the entire transfer to find out.
++        const char *p = line + 6;
++        char shaHex[80], extra[8];
++        unsigned long parsedOff = 0, parsedSize = 0;
++        const int fields = sscanf(p, " %lu %lu %79s %7s", &parsedOff, &parsedSize, shaHex, extra);
++        if (fields != 3) return reject("bad-command");
++        if (parsedOff == 0 || parsedOff > UINT32_MAX) return reject("bad-size");
++        if (parsedSize == 0 || parsedSize > UINT32_MAX) return reject("bad-size");
++        if (strlen(shaHex) != 64 || parseHex32(shaHex, sha) != 0) return reject("bad-sha");
++        // Answered synchronously, because the host's next move on a refusal is a fresh `begin` and
++        // it should not have to wait out a READY timeout to learn that.
++        if (!resValid) return reject("resume-none");
++        if (resPart != esp_ota_get_next_update_partition(nullptr)) return reject("resume-none");
++        if ((uint32_t) parsedOff != resOff || (uint32_t) parsedSize != resSize ||
++            memcmp(sha, resSha, 32) != 0)
++            return reject("resume-mismatch");
++        size = (uint32_t) parsedSize;
++        outSize = size;
++        off = (uint32_t) parsedOff;
++        cmd = PendingCmd::Resume;
+     } else if (strncmp(line, "info", 4) == 0 && (line[4] == ' ' || line[4] == '\0' ||
+                                                  line[4] == '\r' || line[4] == '\n')) {
+         cmd = PendingCmd::Info;
+@@ -878,7 +1266,8 @@ OtaBleSubmit otaBleSubmitCommand(const char *line) {
+     pending = cmd;
+     pendSize = size;
+     pendOut = outSize;
++    pendOff = off;
+     pendXform = x;
+-    if (cmd == PendingCmd::Begin) memcpy(pendSha, sha, 32);
++    if (cmd == PendingCmd::Begin || cmd == PendingCmd::Resume) memcpy(pendSha, sha, 32);
+     return OtaBleSubmit::Accepted;
+ }
+diff --git a/src/ota_ble.h b/src/ota_ble.h
+index e346d39..4813be8 100644
+--- a/src/ota_ble.h
++++ b/src/ota_ble.h
+@@ -53,11 +53,18 @@ void otaBleInit(const OtaBleHooks &hooks);
+ /// Parse and latch one control line:
+ ///   "begin <wireSize> <wireSha256hex>"                    -- a raw image, the original protocol
+ ///   "begin <wireSize> <wireSha256hex> <xform> <imgSize>"  -- xform is "raw" | "tamp" | "delta"
++///   "resume <wireOffset> <wireSize> <wireSha256hex>"      -- continue an interrupted raw transfer
+ ///   "info" | "end" | "abort"
+ /// The size and digest always describe the bytes that go over the WIRE, so credit, progress and
+ /// transfer integrity mean the same thing under every transform; <imgSize> is the image those bytes
+-/// reconstruct to. "info" answers with OTAB INFO / BASE / XFORM: the running slot, the SHA-256 a
+-/// delta must patch from, and the transforms this build can accept.
++/// reconstruct to. "info" answers with OTAB INFO / BASE / RESUME / XFORM: the running slot, the
++/// SHA-256 a delta must patch from, where an interrupted transfer can be picked up (or "none"),
++/// and the transforms this build can accept. XFORM stays last, so a host that treats it as the end
++/// of the reply keeps working; a receiver too old for resume emits no RESUME line at all, which is
++/// the whole capability negotiation. "resume" is refused unless all three arguments match what the
++/// receiver recorded when the previous transfer was torn down -- see doc/resume.md for why the
++/// offset is the receiver's number rather than the host's, and why the already-flashed prefix is
++/// re-hashed out of the slot instead of carried across the drop.
+ /// Safe from any task. Everything checkable without touching flash is checked here and reported
+ /// synchronously, so a consumer's command layer can fail the command instead of reporting success
+ /// and then failing asynchronously. Execution happens on the next otaBleTick().
+@@ -69,6 +76,23 @@ void otaBleStageBytes(const uint8_t *data, size_t len);
+ /// Consumer task: execute a latched command, drain the ring to flash, re-announce credit, and abort
+ /// a transfer that accepts no bytes for 30 seconds. nowMs must be a wrapping monotonic millisecond
+ /// counter (for example millis()).
++///
++/// HOW OFTEN YOU CALL THIS IS THE TRANSFER'S THROUGHPUT. This is not a housekeeping tick.
++/// Credit is a single high-water mark of `bytes drained to flash + 8 KB`, and only this call drains
++/// and re-announces it -- so the host can never be more than 8 KB ahead of your last tick, and any
++/// delay between ticks is dead air on the link. Anything else in the same task that blocks for a
++/// second or more throttles the push by exactly that much, for the whole transfer.
++///
++/// Measured 2026-09-10 on a farm node: a 751 744-byte raw push took 108.58 s (6.76 kB/s) whose
++/// middle half ran at 25.59 kB/s, with only 13.1 s of flash work in it. The cause was the caller's
++/// own loop, which also ran an RS-485 Modbus poll blocking up to 1500 ms per exchange plus a 1500 ms
++/// quarantine after a silent one. Nothing in this module can see that, and nothing in it can
++/// compensate: if a transfer is inexplicably slow, measure the tick interval first.
++///
++/// While otaBleActive(), either give this its own task or make sure everything else sharing the
++/// task is non-blocking. The `quiesce` hook is the right place to stop the work that would block --
++/// it already exists to stop real-time work during flash writes, and stopping it also removes the
++/// thing most likely to be sitting between two ticks.
+ void otaBleTick(uint32_t nowMs);
+ 
+ /// True between a successful begin and the matching end/abort.
+@@ -84,5 +108,10 @@ void otaBleRequestAbort();
+ /// `xformName` nullptr or "raw" keeps the classic behaviour; `outSize` is ignored for raw.
+ bool otaBleBegin(uint32_t size, const char *sha256hex, const char *xformName = nullptr,
+                  uint32_t outSize = 0);
++/// Continue a raw transfer torn down earlier in this session. `offset` must be exactly the one the
++/// receiver reported (OTAB RESUME), and `size`/`sha256hex` must describe the same payload; anything
++/// else is refused with OTAB FAIL resume-mismatch and the caller should fall back to otaBleBegin().
++/// Nothing survives a reboot -- after a restart this always refuses.
++bool otaBleResume(uint32_t offset, uint32_t size, const char *sha256hex);
+ bool otaBleEnd(); ///< on success this reboots and does not return
+ void otaBleAbort();
+diff --git a/test/host-stub/ota_ble-test.cpp b/test/host-stub/ota_ble-test.cpp
+index cc9f1c4..b5ba103 100644
+--- a/test/host-stub/ota_ble-test.cpp
++++ b/test/host-stub/ota_ble-test.cpp
+@@ -52,6 +52,13 @@ static bool sawLine(const char *needle) {
+     return false;
+ }
+ 
++/// The LAST match, for a line a case provokes more than once (`info` before and after something).
++static const Status *findLastLine(const char *needle) {
++    for (size_t i = g_status.size(); i-- > 0;)
++        if (g_status[i].line.find(needle) != std::string::npos) return &g_status[i];
++    return nullptr;
++}
++
+ static const Status *findLine(const char *needle) {
+     for (auto &s : g_status)
+         if (s.line.find(needle) != std::string::npos) return &s;
+@@ -136,6 +143,34 @@ static void pushAll(const std::vector<uint8_t> &img, size_t chunk = 512, int dra
+     otaBleTick(0);
+ }
+ 
++/// Stage a half-open byte range of the image, ticking as it goes. Used to interrupt a transfer at
++/// a chosen point and, later, to deliver only the tail a resume is supposed to still need.
++static void pushRange(const std::vector<uint8_t> &img, size_t from, size_t to, size_t chunk = 512) {
++    size_t sent = from;
++    while (sent < to) {
++        const size_t n = to - sent < chunk ? to - sent : chunk;
++        otaBleStageBytes(img.data() + sent, n);
++        sent += n;
++        otaBleTick(0);
++    }
++    otaBleTick(0);
++}
++
++/// What the receiver last advertised as resumable. False when it said "none" or said nothing.
++static bool resumePoint(uint32_t *off, uint32_t *size) {
++    const Status *s = findLastLine("OTAB RESUME ");
++    if (!s) return false;
++    unsigned a = 0, b = 0;
++    if (sscanf(s->line.c_str(), "OTAB RESUME %u %u", &a, &b) != 2) return false;
++    *off = a;
++    *size = b;
++    return true;
++}
++
++static std::string resumeCmd(uint32_t off, const std::vector<uint8_t> &img) {
++    return "resume " + std::to_string(off) + " " + std::to_string(img.size()) + " " + sha256hex(img);
++}
++
+ /// "begin" for a transformed payload: wire size/digest describe `wire`, `outSize` the image it
+ /// rebuilds to. Deliberately built from the same sha256hex() as the raw form -- if the digest ever
+ /// stopped covering exactly the bytes that go over the link, every one of these cases would break.
+@@ -1089,6 +1124,278 @@ static void test_begin_rejects_trailing_garbage() {
+     end_case();
+ }
+ 
++// ---------------------------------------------------------------- resume
++//
++// These run under every erase strategy on purpose. A resumed session always drives the slot through
++// esp_ota_write_with_offset and the per-sector commit, whatever the build's default strategy is,
++// because that is the only writer here that can start anywhere but offset zero -- so the resume
++// path in an OTA_BLE_SECTOR_SKIP=0 build is DIFFERENT code from the one it took on the way in, and
++// compiling it only under the default would leave that combination unbuilt as well as untested.
++//
++// Every case asserts on the SLOT and on the boot partition, never on a return code: a resume that
++// installs a splice of two builds returns exactly the same booleans as one that works.
++
++/// A different build of the same length: makeImage() is a pure function of the index, so two
++/// makeImage() results of equal length are byte-equal and could not tell a digest check apart.
++static std::vector<uint8_t> withDirtySectors(const std::vector<uint8_t> &img, size_t dirty) {
++    std::vector<uint8_t> v = img;
++    for (size_t k = 0; k < dirty; ++k) {
++        const size_t off = (k * 3 + 1) * 4096;
++        for (size_t i = off; i < off + 4096 && i < v.size(); ++i) v[i] = (uint8_t) (v[i] ^ 0x5A);
++    }
++    return v;
++}
++
++/// Run a transfer that dies partway, the way a dropped BLE link does: the consumer's disconnect
++/// callback calls otaBleRequestAbort(). Returns the resume point the device then advertises.
++static bool interruptAt(const std::vector<uint8_t> &img, size_t at, uint32_t *off, uint32_t *size) {
++    CHECK(otaBleSubmitCommand(beginCmd(img).c_str()) == OtaBleSubmit::Accepted, "begin rejected");
++    otaBleTick(0);
++    pushRange(img, 0, at);
++    otaBleRequestAbort();
++    otaBleTick(0);
++    CHECK(!otaBleActive(), "still active after the link dropped");
++    CHECK(otaBleSubmitCommand("info") == OtaBleSubmit::Accepted, "info rejected");
++    otaBleTick(0);
++    return resumePoint(off, size);
++}
++
++static void test_resume_finishes_the_image() {
++    // The measured failure: a raw push dies at ~23 %. Here it dies at 9 of 20 sectors, and what
++    // matters is that the slot ends up holding the WHOLE image without those 9 sectors crossing the
++    // link twice.
++    begin_case("resume: an interrupted transfer finishes");
++    auto img = makeImage(20 * 4096 + 137);
++    uint32_t off = 0, size = 0;
++    CHECK(interruptAt(img, 9 * 4096 + 900, &off, &size), "no resume point offered");
++    CHECK(size == img.size(), "resume size %u, image is %zu", size, img.size());
++    CHECK(off > 0 && off % 4096 == 0, "resume offset %u is not a sector boundary", off);
++    CHECK(off <= 9 * 4096, "resume offset %u claims more than was ever staged", off);
++    CHECK(g_fake.bootPart == nullptr, "boot partition moved on an interrupted transfer");
++
++    const size_t stagedBefore = g_fake.flashed.size();
++    CHECK(otaBleSubmitCommand(resumeCmd(off, img).c_str()) == OtaBleSubmit::Accepted,
++          "resume rejected");
++    otaBleTick(0);
++    CHECK(otaBleActive(), "not active after resume");
++    CHECK(sawLine("OTAB READY"), "no READY on resume");
++    CHECK(findLastLine("from=") != nullptr, "READY did not say where it picked up");
++    pushRange(img, off, img.size());
++    CHECK(otaBleSubmitCommand("end") == OtaBleSubmit::Accepted, "end rejected");
++    otaBleTick(0);
++
++    CHECK(!sawLine("OTAB FAIL sha"), "digest rejected a correctly resumed image");
++    CHECK(g_fake.bootPart != nullptr, "boot partition not set after a resumed push");
++    CHECK(g_restarted, "did not restart");
++    CHECK(memcmp(g_fake.slot.data(), img.data(), img.size()) == 0,
++          "the slot does not hold the image after a resume");
++    // The point of the whole exercise: the bytes below the resume offset were not re-sent. Only
++    // sector 0 is rewritten, to put back what esp_ota_begin had to erase.
++    const size_t rewritten = g_fake.flashed.size() - stagedBefore;
++    CHECK(rewritten <= img.size() - off + 4096,
++          "resume rewrote %zu bytes for a %zu-byte tail", rewritten, img.size() - off);
++    end_case();
++}
++
++static void test_resume_rehashes_the_prefix_from_flash() {
++    // THE case this design turns on. The receiver cannot carry a hash state across a dropped link,
++    // so it re-reads the already-flashed prefix and hashes THAT. Corrupt the slot under it: if the
++    // prefix were assumed good, `end` would pass and a spliced image would be marked bootable.
++    begin_case("resume: a corrupted prefix fails the whole-image digest");
++    auto img = makeImage(20 * 4096);
++    uint32_t off = 0, size = 0;
++    CHECK(interruptAt(img, 9 * 4096, &off, &size), "no resume point offered");
++    CHECK(off >= 2 * 4096, "need at least two sectors in the slot to corrupt one");
++
++    g_fake.slot[4096 + 17] ^= 0xFF; // inside the prefix, above sector 0, never re-sent
++
++    CHECK(otaBleSubmitCommand(resumeCmd(off, img).c_str()) == OtaBleSubmit::Accepted,
++          "resume rejected");
++    otaBleTick(0);
++    pushRange(img, off, img.size());
++    CHECK(otaBleSubmitCommand("end") == OtaBleSubmit::Accepted, "end rejected");
++    otaBleTick(0);
++
++    CHECK(sawLine("OTAB FAIL sha-mismatch"), "a corrupted prefix was not caught by the digest");
++    CHECK(g_fake.bootPart == nullptr, "boot partition moved on a spliced image");
++    CHECK(!g_restarted, "restarted into an unverified image");
++    end_case();
++}
++
++static void test_resume_with_a_different_digest_is_refused() {
++    // A host that resumes the wrong build must be told so BEFORE it spends a transfer finding out.
++    begin_case("resume: a mismatched digest is refused");
++    auto img = makeImage(20 * 4096);
++    // Same LENGTH, different bytes -- so only the digest can tell them apart. makeImage() is a
++    // function of the index alone, so a longer image truncated to this length would be byte-equal
++    // and this case would test nothing.
++    auto other = withDirtySectors(img, 5);
++    uint32_t off = 0, size = 0;
++    CHECK(interruptAt(img, 9 * 4096, &off, &size), "no resume point offered");
++
++    CHECK(otaBleSubmitCommand(resumeCmd(off, other).c_str()) == OtaBleSubmit::Rejected,
++          "resume with the wrong digest was accepted");
++    CHECK(sawLine("OTAB FAIL resume-mismatch"), "no resume-mismatch");
++    otaBleTick(0);
++    CHECK(!otaBleActive(), "a refused resume left a session open");
++    CHECK(g_fake.bootPart == nullptr, "boot partition moved on a refused resume");
++
++    // A refusal is not a dead end: the fallback every host takes is a fresh push, and it must work.
++    CHECK(otaBleSubmitCommand(beginCmd(other).c_str()) == OtaBleSubmit::Accepted,
++          "fresh begin after a refused resume was rejected");
++    otaBleTick(0);
++    pushAll(other);
++    CHECK(otaBleSubmitCommand("end") == OtaBleSubmit::Accepted, "end rejected");
++    otaBleTick(0);
++    CHECK(g_fake.bootPart != nullptr, "the fallback push did not install");
++    CHECK(memcmp(g_fake.slot.data(), other.data(), other.size()) == 0,
++          "the slot does not hold the image the fallback pushed");
++    end_case();
++}
++
++static void test_resume_at_the_wrong_offset_is_refused() {
++    // The offset is the RECEIVER'S number echoed back. A host that invents one -- an old tool, a
++    // different chunking, a misread log -- must not be able to place bytes at an offset nothing
++    // ever wrote below.
++    begin_case("resume: an offset the receiver did not name is refused");
++    auto img = makeImage(20 * 4096);
++    uint32_t off = 0, size = 0;
++    CHECK(interruptAt(img, 9 * 4096, &off, &size), "no resume point offered");
++
++    CHECK(otaBleSubmitCommand(resumeCmd(off + 4096, img).c_str()) == OtaBleSubmit::Rejected,
++          "a too-high resume offset was accepted");
++    CHECK(otaBleSubmitCommand(resumeCmd(off - 4096, img).c_str()) == OtaBleSubmit::Rejected,
++          "a too-low resume offset was accepted");
++    CHECK(otaBleSubmitCommand(("resume 0 " + std::to_string(img.size()) + " " + sha256hex(img)).c_str())
++                  == OtaBleSubmit::Rejected, "a zero resume offset was accepted");
++    CHECK(otaBleSubmitCommand(resumeCmd(off, img).c_str()) == OtaBleSubmit::Accepted,
++          "the receiver's own offset was refused");
++    otaBleTick(0);
++    otaBleRequestAbort();
++    otaBleTick(0);
++    end_case();
++}
++
++static void test_resume_is_not_offered_without_a_partial() {
++    // "none" rather than silence: a host has to be able to tell "I can resume, there is nothing to
++    // resume" from "I have never heard of resume", because only the first says the NEXT drop is
++    // recoverable.
++    begin_case("resume: nothing to continue reports none");
++    CHECK(otaBleSubmitCommand("info") == OtaBleSubmit::Accepted, "info rejected");
++    otaBleTick(0);
++    CHECK(sawLine("OTAB RESUME none"), "a fresh receiver did not report RESUME none");
++    uint32_t off = 0, size = 0;
++    CHECK(!resumePoint(&off, &size), "a fresh receiver offered a resume point");
++    // And the command itself is refused, which is what an old host that guesses would hit.
++    CHECK(otaBleSubmitCommand("resume 4096 20000 "
++                              "0000000000000000000000000000000000000000000000000000000000000000")
++                  == OtaBleSubmit::Rejected, "resume accepted with no transfer to continue");
++    CHECK(sawLine("OTAB FAIL resume-none"), "no resume-none");
++
++    // A COMPLETED push leaves nothing either: the slot holds a whole image, not a prefix.
++    auto img = makeImage(8 * 4096);
++    CHECK(otaBleSubmitCommand(beginCmd(img).c_str()) == OtaBleSubmit::Accepted, "begin rejected");
++    otaBleTick(0);
++    pushAll(img);
++    CHECK(otaBleSubmitCommand("end") == OtaBleSubmit::Accepted, "end rejected");
++    otaBleTick(0);
++    g_status.clear();
++    CHECK(otaBleSubmitCommand("info") == OtaBleSubmit::Accepted, "info rejected");
++    otaBleTick(0);
++    CHECK(sawLine("OTAB RESUME none"), "a completed push left a resume point behind");
++    end_case();
++}
++
++static void test_resume_is_not_offered_after_a_transform() {
++    // Under delta (and tamp) a wire offset is not an image offset, and the transform's own state --
++    // patch decoder, compression window -- died with the session. There is nothing a byte offset
++    // could mean, so the receiver must not offer one.
++    begin_case("resume: a transformed transfer offers nothing");
++    auto img = makeImage(20 * 4096);
++    auto wire = deltaWire(g_fake.baseSha, img);
++    g_fake.base.assign(img.size(), 0x11);
++    CHECK(otaBleSubmitCommand(beginCmdX(wire, "delta", img.size()).c_str()) == OtaBleSubmit::Accepted,
++          "delta begin rejected");
++    otaBleTick(0);
++    pushRange(wire, 0, 9 * 4096);
++    otaBleRequestAbort();
++    otaBleTick(0);
++    CHECK(otaBleSubmitCommand("info") == OtaBleSubmit::Accepted, "info rejected");
++    otaBleTick(0);
++    CHECK(sawLine("OTAB RESUME none"), "an interrupted delta offered a resume point");
++    end_case();
++}
++
++static void test_resume_record_does_not_outlive_the_slot() {
++    // A record is a promise about what is in the slot. A fresh `begin` erases into that slot, so
++    // the promise has to be withdrawn before it does -- even if that begin then goes nowhere.
++    begin_case("resume: a fresh begin drops the recorded point");
++    auto img = makeImage(20 * 4096);
++    uint32_t off = 0, size = 0;
++    CHECK(interruptAt(img, 9 * 4096, &off, &size), "no resume point offered");
++
++    auto other = makeImage(12 * 4096);
++    CHECK(otaBleSubmitCommand(beginCmd(other).c_str()) == OtaBleSubmit::Accepted, "begin rejected");
++    otaBleTick(0);
++    otaBleRequestAbort(); // dies immediately, before anything is flushed
++    otaBleTick(0);
++
++    g_status.clear();
++    CHECK(otaBleSubmitCommand("info") == OtaBleSubmit::Accepted, "info rejected");
++    otaBleTick(0);
++    CHECK(sawLine("OTAB RESUME none"), "the old resume point survived a fresh begin");
++    CHECK(otaBleSubmitCommand(resumeCmd(off, img).c_str()) == OtaBleSubmit::Rejected,
++          "resumed onto a slot a later begin had erased");
++    end_case();
++}
++
++static void test_resume_record_dropped_by_a_begin_that_fails_after_erasing() {
++    // The narrow one. esp_ota_begin erases BEFORE the later checks in beginWithDigest run, so a
++    // begin that fails after it -- here a delta whose base cannot be hashed -- destroys slot
++    // content and then returns without ever reaching an abort. Nothing downstream would clear the
++    // record on that path, which is why beginWithDigest drops it on the way in rather than on the
++    // way out.
++    begin_case("resume: a begin that erases and then fails drops the record");
++    auto img = makeImage(20 * 4096);
++    uint32_t off = 0, size = 0;
++    CHECK(interruptAt(img, 9 * 4096, &off, &size), "no resume point offered");
++
++    g_fake.base.assign(img.size(), 0x11);
++    g_fake.failBaseSha = true;
++    auto wire = deltaWire(g_fake.baseSha, img);
++    CHECK(otaBleSubmitCommand(beginCmdX(wire, "delta", img.size()).c_str()) == OtaBleSubmit::Accepted,
++          "delta begin rejected");
++    otaBleTick(0);
++    CHECK(sawLine("OTAB FAIL no-base"), "the delta begin did not fail where this case needs it to");
++    CHECK(!otaBleActive(), "a failed begin left a session open");
++
++    g_status.clear();
++    CHECK(otaBleSubmitCommand("info") == OtaBleSubmit::Accepted, "info rejected");
++    otaBleTick(0);
++    CHECK(sawLine("OTAB RESUME none"),
++          "a resume point survived a begin that had already erased the slot");
++    CHECK(otaBleSubmitCommand(resumeCmd(off, img).c_str()) == OtaBleSubmit::Rejected,
++          "resumed onto a slot a failed begin had erased");
++    end_case();
++}
++
++static void test_resume_malformed_commands() {
++    begin_case("resume: malformed forms are rejected");
++    auto img = makeImage(20 * 4096);
++    uint32_t off = 0, size = 0;
++    CHECK(interruptAt(img, 9 * 4096, &off, &size), "no resume point offered");
++    const std::string sha = sha256hex(img);
++    CHECK(otaBleSubmitCommand("resume") == OtaBleSubmit::Rejected, "bare resume accepted");
++    CHECK(otaBleSubmitCommand("resume 4096") == OtaBleSubmit::Rejected, "one-field resume accepted");
++    CHECK(otaBleSubmitCommand(("resume 4096 20000 " + sha + " EXTRA").c_str()) == OtaBleSubmit::Rejected,
++          "trailing garbage accepted");
++    CHECK(otaBleSubmitCommand(("resume 4096 20000 " + sha.substr(0, 63)).c_str()) == OtaBleSubmit::Rejected,
++          "short digest accepted");
++    CHECK(otaBleSubmitCommand("resumes 1 2 3") == OtaBleSubmit::Rejected, "resumes accepted");
++    CHECK(!otaBleActive(), "a malformed resume armed a session");
++    end_case();
++}
++
+ int main() {
+     printf("ota_ble host tests\n");
+     test_happy_path();
+@@ -1145,6 +1452,15 @@ int main() {
+     test_delta_bad_magic_is_refused();
+     test_delta_header_only_is_refused();
+     test_delta_truncated_header_is_refused();
++    test_resume_finishes_the_image();
++    test_resume_rehashes_the_prefix_from_flash();
++    test_resume_with_a_different_digest_is_refused();
++    test_resume_at_the_wrong_offset_is_refused();
++    test_resume_is_not_offered_without_a_partial();
++    test_resume_is_not_offered_after_a_transform();
++    test_resume_record_does_not_outlive_the_slot();
++    test_resume_record_dropped_by_a_begin_that_fails_after_erasing();
++    test_resume_malformed_commands();
+ 
+     if (g_failures) {
+         printf("\n%d check(s) FAILED\n", g_failures);
+diff --git a/test/run.sh b/test/run.sh
+index 6574485..85ead55 100755
+--- a/test/run.sh
++++ b/test/run.sh
+@@ -49,3 +49,10 @@ run_suite() {
+ run_suite "erase strategy: sequential writes" -DOTA_BLE_SECTOR_SKIP=0
+ run_suite "erase strategy: erase-ahead" -DOTA_BLE_SECTOR_SKIP=0 -DCONFIG_SPI_FLASH_YIELD_DURING_ERASE
+ run_suite "erase strategy: skip identical sectors"
++
++# Host side. Pure stdlib -- no bleak, no radio. These cover the halves of the protocol the C++
++# suite structurally cannot reach: what a host does when the RECEIVER is the old one.
++for t in test/test_find_device.py test/test_resume_host.py test/test_host_helpers.py; do
++    echo "--- $t"
++    python3 "$t" 2>&1 | tail -3
++done

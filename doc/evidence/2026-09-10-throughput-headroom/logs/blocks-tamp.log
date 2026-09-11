@@ -1,0 +1,29 @@
+SETUP OTAB AUTH ok
+SETUP BENCH LINK interval=12 mtu=517 phy_known=1 tx=2 rx=2
+BEFORE {"base": "ef345bdcb77b19dedd3b0a83582c8832efd39e556528b7234e3cb06b77198702", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}
+LINK mtu=515 max_write=512 chunk=495
+[0.401] OTAB RING 262144
+[0.401] OTAB READY part=app0 size=523384 xform=tamp out=757104
+[0.581] OTAB FAIL xform ESP_ERR_INVALID_CRC
+[0.581] OTAB FAIL aborted
+Traceback (most recent call last):
+  File "/Users/fab/o2p-push/ota-throughput-next/node/tools/bench_ble_ota.py", line 171, in <module>
+    ap.add_argument('--delta',action='store_true',help='install a bench change, excluded from raw throughput comparison')
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/runners.py", line 205, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/runners.py", line 128, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/base_events.py", line 720, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/Users/fab/o2p-push/ota-throughput-next/node/tools/bench_ble_ota.py", line 107, in run
+    wire, payload = ('raw', data)
+         ^^^^^^^^^^^^^^^^^^^^^^^^
+    if args.delta or args.xform!='raw':
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/fab/dev/pv/esp-ota-ble/host/esp_ota_ble.py", line 1224, in push_image
+    raise OtaBleError(state["fail"])
+esp_ota_ble.OtaBleError: OTAB FAIL aborted

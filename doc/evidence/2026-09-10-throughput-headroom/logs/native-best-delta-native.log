@@ -1,0 +1,18 @@
+NATIVE DISCOVER rssi=-30
+[0.000] OTAB AUTH ok
+[0.000] BENCH interval requested; inspect link after settling
+[0.000] BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0
+[0.000] BENCH BUFFERS msys1=50 size=256 msys2=96 acl=96 ce=2
+[0.000] OTAB INFO run=app1 slot=1572864
+[0.000] OTAB BASE 9f8abf18b2ad59476c71f4c3ab757b6e9bc3fb8b7f5f5a95cb64263f015ba587
+[0.000] OTAB RESUME none
+[0.000] OTAB XFORM raw,tamp,delta
+[0.432] OTAB RING 262144
+[0.432] OTAB READY part=app0 size=253907 xform=delta out=757104
+[5.882] OTAB STAT write_ms=5266 calls=124 erase_ms=2211 out=757104
+[6.082] OTAB SKIP kept=0 wrote=185 erases=11 erase_ms=2211
+[6.082] OTAB FLASH mode=internal program_bytes=757104 erase_bytes=757760
+[6.082] OTAB TIME begin_ms=213 program_ms=2552 compare_us=0
+[6.082] OTAB OK rebooting
+[6.082] BENCH REBOOT graceful=1
+NATIVE_RESULT {"backend":"native-CoreBluetooth","before":{"base":"9f8abf18b2ad59476c71f4c3ab757b6e9bc3fb8b7f5f5a95cb64263f015ba587","run":"app1","slot":1572864},"bytes":253907,"elapsed":6.1409444999999998,"image_bytes":757104,"lines":[[0,"OTAB AUTH ok"],[0,"BENCH interval requested; inspect link after settling"],[0,"BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0"],[0,"BENCH BUFFERS msys1=50 size=256 msys2=96 acl=96 ce=2"],[0,"OTAB INFO run=app1 slot=1572864"],[0,"OTAB BASE 9f8abf18b2ad59476c71f4c3ab757b6e9bc3fb8b7f5f5a95cb64263f015ba587"],[0,"OTAB RESUME none"],[0,"OTAB XFORM raw,tamp,delta"],[0.431577875,"OTAB RING 262144"],[0.43174525000000002,"OTAB READY part=app0 size=253907 xform=delta out=757104"],[0.43177370799999998,"OTAB CRED 253907"],[5.8817331250000002,"OTAB PROG 253907\/253907"],[5.881874958,"OTAB STAT write_ms=5266 calls=124 erase_ms=2211 out=757104"],[5.8828136249999998,"OTAB CRED 253907"],[6.0818738330000004,"OTAB SKIP kept=0 wrote=185 erases=11 erase_ms=2211"],[6.082066792,"OTAB FLASH mode=internal program_bytes=757104 erase_bytes=757760"],[6.0821069999999997,"OTAB TIME begin_ms=213 program_ms=2552 compare_us=0"],[6.082137125,"OTAB OK rebooting"],[6.0821570830000002,"BENCH REBOOT graceful=1"]],"payload_sha256":"2b25c39fb07bd556d58abede6541e18c933f7e4e7ffd71efcc9db312bfb5015e","ready_callbacks":513,"sent":253907,"transfer_hint":true,"wire":"delta","writes":513}

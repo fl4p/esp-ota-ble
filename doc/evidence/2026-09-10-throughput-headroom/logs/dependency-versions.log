@@ -1,0 +1,44 @@
+{
+  "python": "3.14.7",
+  "macos": "15.7.3",
+  "machine": "arm64",
+  "cpu": "Apple M3 Pro",
+  "python_packages": {
+    "bleak": "3.0.2",
+    "detools": "0.53.0",
+    "tamp": "2.3.0",
+    "pyobjc-core": "12.2.1",
+    "pyserial": "3.5"
+  },
+  "swift": "swift-driver version: 1.127.15 Apple Swift version 6.2.4 (swiftlang-6.2.4.1.4 clang-1700.6.4.2)\nTarget: arm64-apple-macosx15.0",
+  "NimBLE-Arduino": "2.5.1",
+  "ESP-IDF": "5.5.5",
+  "current_native_binaries": {
+    "native_push": {
+      "binary_sha256": "3b63e3126abb45fb60c904821d4f7f13ca7a2643a621a350154693d314310910",
+      "source_sha256": "5bd361229902f2f5629e5acbab95fd627326b9d769047479defc8a96d9912b41"
+    },
+    "native_push_tuned": {
+      "binary_sha256": "0337caf83947ff38244664f16e9c344a3bfbf364863006767396596d8b3d7b75",
+      "source_sha256": "4e5c8bac3c4bfba1ed736b86ff82f7bb7e50872380aa1c1dac1f0240da9c9d91"
+    },
+    "native_push_xform": {
+      "binary_sha256": "4cd08eb01f668f2a1fbe6a8bd8e6cae2b95b1fc73835c521af69e96c5fc0bb1d",
+      "source_sha256": "5145394a5f31eaa8fbacf29722967e1e57663af7167f54faa55223ecf4a17504"
+    },
+    "native_push_priority": {
+      "binary_sha256": "ad277e7a1de6f12bbcc75b8c62f7c27b721bae0c629c67e535b6569f7965c268",
+      "source_sha256": "a6b94c2cfd649751c122fd8fe19dfcdbd971a14b6d502583a4842e5c5b5b7e27"
+    },
+    "native_push_priority_queue": {
+      "binary_sha256": "60b7e33fdc839a0401010e21b5dc402458d16622fba845fd353c87881a1312c3",
+      "source_sha256": "2c8af266cb26aabd5a0ea2e734ade76d037f370f40bb77ea89853444bcc951c6"
+    }
+  },
+  "nrf_sniffer": {
+    "package_firmware_filename": "sniffer_nrf52840dongle_nrf52840_4.1.1.hex",
+    "device_firmware_readback": null,
+    "packet_parser_sha256": "1c34a3fd4c4d11721cfa9568ac6281856344c7e880999d724a1b644910b51de4",
+    "note": "Packet.py calls LL header bit 2 sn and bit 3 nesn. The capture script exports them by their actual meaning: bit 3 SN, bit 2 NESN."
+  }
+}

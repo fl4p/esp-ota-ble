@@ -1,0 +1,18 @@
+farmgw
+Linux farmgw 6.18.34+rpt-rpi-v8 #1 SMP PREEMPT Debian 1:6.18.34-1+rpt1 (2026-06-09) aarch64 GNU/Linux
+bluetoothctl: 5.82
+Index list with 1 item
+hci0:	Primary controller
+	addr DC:A6:32:6A:5E:A4 version 9 manufacturer 305 class 0x400000
+	supported settings: powered connectable fast-connectable discoverable bondable link-security ssp br/edr le advertising secure-conn debug-keys privacy configuration static-addr phy-configuration 
+	current settings: powered ssp br/edr le secure-conn 
+	name farmgw
+	short name 
+hci0:	Configuration options
+	supported options: public-address 
+	missing options: 
+Supported phys: BR1M1SLOT BR1M3SLOT BR1M5SLOT EDR2M1SLOT EDR2M3SLOT EDR2M5SLOT EDR3M1SLOT EDR3M3SLOT EDR3M5SLOT LE1MTX LE1MRX 
+Configurable phys: BR1M3SLOT BR1M5SLOT EDR2M1SLOT EDR2M3SLOT EDR2M5SLOT EDR3M1SLOT EDR3M3SLOT EDR3M5SLOT 
+Selected phys: BR1M1SLOT BR1M3SLOT BR1M5SLOT EDR2M1SLOT EDR2M3SLOT EDR2M5SLOT EDR3M1SLOT EDR3M3SLOT EDR3M5SLOT LE1MTX LE1MRX 
+Connections:
+	< LE 34:B7:DA:5B:84:E1 handle 64 state 1 lm CENTRAL 

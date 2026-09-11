@@ -1,0 +1,13 @@
+DISCOVERY adapter=hci0 address=7C:4F:AD:20:2A:29 rssi=-42
+SETUP OTAB AUTH ok
+/home/fab/ota-throughput-20260911/venv/lib/python3.11/site-packages/bleak/backends/bluezdbus/client.py:646: UserWarning: Using default MTU value. Call _acquire_mtu() or set _mtu_size first to avoid this warning.
+  warnings.warn(
+SETUP BENCH interval requested; inspect link after settling
+SETUP BENCH LINK interval=6 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0
+SETUP BENCH BUFFERS msys1=50 size=256 msys2=96 acl=96
+SETUP BENCH DLE tx=251 tx_us=2120 rx=251 rx_us=2120
+SETUP BENCH HOST AcquireWrite mtu=517 socket_type=5
+BENCH RAM ready
+BENCH RAM bytes=524288 us=19005191 sha=678b3d12a6d1d76449cef5c27d5316c5c19a5f08a6025fdbf16e1592e3cb479c
+BENCH LINK interval=6 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0
+RESULT {"adapter": "hci0", "after": {"base": "211ea7abf09afb50c982f7caa027d8eaf55a037c562be385efe928cfacad99d3", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "before": {"base": "211ea7abf09afb50c982f7caa027d8eaf55a037c562be385efe928cfacad99d3", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "burst": 1, "bytes": 524288, "chunk": 495, "fields": {"bytes": "524288", "sha": "678b3d12a6d1d76449cef5c27d5316c5c19a5f08a6025fdbf16e1592e3cb479c", "us": "19005191"}, "host": "rpi", "host_elapsed": 19.056084559997544, "host_kB_s": 27.512892186707823, "interval": 6, "label": "XipQuiet", "poll_s": null, "post_link": "BENCH LINK interval=6 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0", "purpose": "ram-only", "ready_callbacks": null, "ready_event": false, "receiver_kB_s": 27.58656832230731, "setup": ["OTAB AUTH ok", "BENCH interval requested; inspect link after settling", "BENCH LINK interval=6 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0", "BENCH BUFFERS msys1=50 size=256 msys2=96 acl=96", "BENCH DLE tx=251 tx_us=2120 rx=251 rx_us=2120", "BENCH HOST AcquireWrite mtu=517 socket_type=5"], "verified": true, "write_fd": true}

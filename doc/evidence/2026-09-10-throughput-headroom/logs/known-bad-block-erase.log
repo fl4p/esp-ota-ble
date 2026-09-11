@@ -1,0 +1,4 @@
+  FAIL [bench forced full rewrite] test/host-stub/bench-strategy-test.cpp:22: wrong erase coverage
+  FAIL [bench forced full rewrite] test/host-stub/ota_ble-test.cpp:93: wrote into flash that was never erased
+  FAIL [bench forced full rewrite] test/host-stub/bench-strategy-test.cpp:22: wrong erase coverage
+  FAIL [bench forced full rewrite] test/host-stub/ota_ble-test.cpp:93: wrote into flash that was never erased

@@ -1,0 +1,12 @@
+{
+  "controller_chipset": "BCM_4388",
+  "controller_discoverable": "attrib_off",
+  "controller_firmwareVersion": "22.5.542.2785",
+  "controller_productID": "0x4A2E",
+  "controller_state": "attrib_on",
+  "controller_supportedServices": "0x392039 < HFP AVRCP A2DP HID Braille LEA AACP GATT SerialPort >",
+  "controller_transport": "PCIe",
+  "controller_vendorID": "0x004C (Apple)",
+  "connected_count": 1,
+  "bench_connected": true
+}

@@ -1,0 +1,12 @@
+SETUP OTAB AUTH ok
+BEFORE {"base": "19ee4942881a9fcd451dcd23fed1a348e08d0676758d5552d8fcc31d60677cdd", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}
+LINK mtu=515 max_write=512 chunk=495
+delta against node_Fast.bin
+[0.160] OTAB RING 262144
+[0.160] OTAB READY part=app1 size=31976 xform=delta out=722016
+[14.171] OTAB STAT write_ms=13984 calls=17 erase_ms=9195 out=722016
+[14.396] OTAB SKIP kept=0 wrote=177 erases=177 erase_ms=9234
+[14.397] OTAB OK rebooting
+VERIFY RETRY RuntimeError('bench device not found')
+SETUP OTAB AUTH ok
+RESULT {"after": {"base": "a047233a7af6e4a96e884fdb91c34f07a9ed2467401955e29c396e6805045801", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "before": {"base": "19ee4942881a9fcd451dcd23fed1a348e08d0676758d5552d8fcc31d60677cdd", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "burst": 1, "bytes": 722016, "chunk": 495, "elapsed": 15.220969457994215, "flash": {}, "image": "/Users/fab/o2p-push/ota-throughput-next/node_Profile.bin", "image_kB_s": 47.43561190320827, "kB_s": 2.100786029973003, "name": "farmnode-202A29", "paced_writes": 64, "purpose": "install", "real_write": true, "setup": [], "skip": {"erase_ms": "9234", "erases": "177", "kept": "0", "wrote": "177"}, "stats": {"calls": "17", "erase_ms": "9195", "out": "722016", "write_ms": "13984"}, "transfer_hint": true, "verified": true, "wire": "delta", "wire_bytes": 31976}

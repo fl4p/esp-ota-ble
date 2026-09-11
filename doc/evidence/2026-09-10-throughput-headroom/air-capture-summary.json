@@ -1,0 +1,108 @@
+[
+  {
+    "captured_packets": 284,
+    "captured_events": 91,
+    "median_event_spacing_ms": 30.002,
+    "captured_firmware_write_starts": 196,
+    "observed_value_sizes": {
+      "244": 195,
+      "117": 1
+    }
+  },
+  {
+    "captured_packets": 111,
+    "captured_events": 51,
+    "median_event_spacing_ms": 30.002499999999998,
+    "captured_firmware_write_starts": 0,
+    "observed_value_sizes": {}
+  },
+  {
+    "captured_packets": 492,
+    "captured_events": 133,
+    "median_event_spacing_ms": 30.001,
+    "captured_firmware_write_starts": 301,
+    "observed_value_sizes": {
+      "244": 301
+    }
+  },
+  {
+    "captured_packets": 1332,
+    "captured_events": 315,
+    "median_event_spacing_ms": 30.002,
+    "captured_firmware_write_starts": 435,
+    "observed_value_sizes": {
+      "495": 433,
+      "367": 2
+    }
+  },
+  {
+    "captured_packets": 48,
+    "captured_events": 41,
+    "median_event_spacing_ms": 29.808,
+    "captured_firmware_write_starts": 0,
+    "observed_value_sizes": {}
+  },
+  {
+    "captured_packets": 3561,
+    "captured_events": 903,
+    "median_event_spacing_ms": 45.003,
+    "captured_firmware_write_starts": 1540,
+    "observed_value_sizes": {
+      "495": 1539,
+      "249": 1
+    }
+  },
+  {
+    "captured_packets": 1308,
+    "captured_events": 304,
+    "median_event_spacing_ms": 30.002,
+    "captured_firmware_write_starts": 427,
+    "observed_value_sizes": {
+      "495": 426,
+      "353": 1
+    }
+  },
+  {
+    "captured_packets": 48,
+    "captured_events": 41,
+    "median_event_spacing_ms": 29.8095,
+    "captured_firmware_write_starts": 0,
+    "observed_value_sizes": {}
+  },
+  {
+    "captured_packets": 3610,
+    "captured_events": 956,
+    "median_event_spacing_ms": 60.004,
+    "captured_firmware_write_starts": 1557,
+    "observed_value_sizes": {
+      "495": 1556,
+      "244": 1
+    }
+  },
+  {
+    "captured_packets": 1335,
+    "captured_events": 327,
+    "median_event_spacing_ms": 30.002,
+    "captured_firmware_write_starts": 430,
+    "observed_value_sizes": {
+      "495": 429,
+      "367": 1
+    }
+  },
+  {
+    "captured_packets": 50,
+    "captured_events": 42,
+    "median_event_spacing_ms": 29.905,
+    "captured_firmware_write_starts": 0,
+    "observed_value_sizes": {}
+  },
+  {
+    "captured_packets": 1067,
+    "captured_events": 312,
+    "median_event_spacing_ms": 90.006,
+    "captured_firmware_write_starts": 494,
+    "observed_value_sizes": {
+      "495": 494
+    }
+  }
+]

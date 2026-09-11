@@ -1,0 +1,1 @@
+PASS: exact full programming/erase coverage, boundaries, truncation, digest, overflow and flash failures

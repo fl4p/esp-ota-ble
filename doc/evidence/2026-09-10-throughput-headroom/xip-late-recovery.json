@@ -1,0 +1,23 @@
+{
+  "after": {
+    "run": "app1",
+    "slot": 1572864,
+    "base": "7188caa4d5cc3e164aa0beac877dbef7626b66d09cf37e3a755e3340a35325a2",
+    "resume_capable": true,
+    "resume": null,
+    "xforms": [
+      "raw",
+      "tamp",
+      "delta"
+    ]
+  },
+  "exact_xip_running": true,
+  "setup": [
+    "OTAB AUTH ok",
+    "BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2",
+    "BENCH BUFFERS msys1=50 size=256 msys2=96 acl=96",
+    "BENCH DLE tx=251 tx_us=17040 rx=251 rx_us=2120",
+    "BENCH FLASH id=852018 driver=generic bytes=16777216 caps=4"
+  ],
+  "note": "Late verification after USB open caused USB_UART_CHIP_RESET; original restore remains unverified"
+}

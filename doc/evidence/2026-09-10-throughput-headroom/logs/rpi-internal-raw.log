@@ -1,0 +1,21 @@
+DISCOVERY adapter=hci1 address=7C:4F:AD:20:2A:29 rssi=-31
+Traceback (most recent call last):
+  File "/home/fab/ota-throughput-20260911/node/tools/bench_ble_ota.py", line 275, in <module>
+    asyncio.run(run(ap.parse_args()))
+  File "/usr/lib/python3.11/asyncio/runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/asyncio/base_events.py", line 653, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/fab/ota-throughput-20260911/node/tools/bench_ble_ota.py", line 173, in run
+    link = await connect(args)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/fab/ota-throughput-20260911/node/tools/bench_ble_ota.py", line 72, in connect
+    await link.open(dev)
+  File "/home/fab/ota-throughput-20260911/esp-ota-ble/host/esp_ota_ble.py", line 405, in open
+    raise OtaBleError("could not establish a BLE link after %d attempts: %s"
+esp_ota_ble.OtaBleError: could not establish a BLE link after 3 attempts: device 'dev_7C_4F_AD_20_2A_29' not found

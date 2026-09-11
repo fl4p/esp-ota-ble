@@ -1,0 +1,15 @@
+{
+  "run": "app1",
+  "slot": 1572864,
+  "base": "868010a3e909cbf796bfc6cfc7ea5312514fe180bd2df0526f419449c39fbbbc",
+  "resume_capable": true,
+  "resume": {
+    "off": 720896,
+    "size": 754624
+  },
+  "xforms": [
+    "raw",
+    "tamp",
+    "delta"
+  ]
+}

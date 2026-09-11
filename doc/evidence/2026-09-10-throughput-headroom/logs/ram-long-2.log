@@ -1,0 +1,9 @@
+SETUP OTAB AUTH ok
+SETUP BENCH interval requested; inspect link after settling
+SETUP BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2
+SETUP BENCH BUFFERS msys1=50 size=256 msys2=24
+SETUP BENCH DLE tx=251 tx_us=17040 rx=251 rx_us=2120
+BENCH RAM ready
+BENCH RAM bytes=6291456 us=67688883 sha=347a51bb89335c77ddd2c9af657dfff0b193d526818b60d75b521c58c2752dbd
+BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2
+RESULT {"after": {"base": "f400b7941031735a44ac503973fc69ec4b0c40e89b3c5f4945ac3fe94001f66b", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "before": {"base": "f400b7941031735a44ac503973fc69ec4b0c40e89b3c5f4945ac3fe94001f66b", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "burst": 1, "bytes": 6291456, "chunk": 495, "fields": {"bytes": "6291456", "sha": "347a51bb89335c77ddd2c9af657dfff0b193d526818b60d75b521c58c2752dbd", "us": "67688883"}, "host_elapsed": 67.93652533297427, "host_kB_s": 92.60785665978598, "label": "Combined", "poll_s": null, "post_link": "BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2", "purpose": "ram-only", "receiver_kB_s": 92.94666599831467, "setup": ["OTAB AUTH ok", "BENCH interval requested; inspect link after settling", "BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2", "BENCH BUFFERS msys1=50 size=256 msys2=24", "BENCH DLE tx=251 tx_us=17040 rx=251 rx_us=2120"], "verified": true}

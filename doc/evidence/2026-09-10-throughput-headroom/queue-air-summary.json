@@ -1,0 +1,128 @@
+[
+  {
+    "start_packet": 2150,
+    "end_packet": 6434,
+    "median_interval_ms": 60.004,
+    "active_events": 542,
+    "observed_large_pdu_per_event": {
+      "5": 385,
+      "3": 3,
+      "1": 135,
+      "4": 16,
+      "2": 3
+    },
+    "final_large_central_md": {
+      "0": 387,
+      "1": 155
+    },
+    "note": "Captured transmissions include retransmissions; incomplete capture is not packet-loss evidence."
+  },
+  {
+    "start_packet": 7043,
+    "end_packet": 11380,
+    "median_interval_ms": 125.008,
+    "active_events": 567,
+    "observed_large_pdu_per_event": {
+      "1": 151,
+      "5": 361,
+      "2": 12,
+      "3": 12,
+      "4": 31
+    },
+    "final_large_central_md": {
+      "1": 204,
+      "0": 363
+    },
+    "note": "Captured transmissions include retransmissions; incomplete capture is not packet-loss evidence."
+  },
+  {
+    "start_packet": 11980,
+    "end_packet": 16293,
+    "median_interval_ms": 130.008,
+    "active_events": 530,
+    "observed_large_pdu_per_event": {
+      "5": 367,
+      "1": 104,
+      "2": 15,
+      "3": 17,
+      "4": 27
+    },
+    "final_large_central_md": {
+      "0": 369,
+      "1": 161
+    },
+    "note": "Captured transmissions include retransmissions; incomplete capture is not packet-loss evidence."
+  },
+  {
+    "start_packet": 18358,
+    "end_packet": 27077,
+    "median_interval_ms": 10.001,
+    "active_events": 1223,
+    "observed_large_pdu_per_event": {
+      "1": 283,
+      "3": 57,
+      "5": 515,
+      "4": 306,
+      "2": 62
+    },
+    "final_large_central_md": {
+      "1": 693,
+      "0": 530
+    },
+    "note": "Captured transmissions include retransmissions; incomplete capture is not packet-loss evidence."
+  },
+  {
+    "start_packet": 29154,
+    "end_packet": 37860,
+    "median_interval_ms": 10.001,
+    "active_events": 1191,
+    "observed_large_pdu_per_event": {
+      "5": 523,
+      "1": 226,
+      "2": 90,
+      "3": 40,
+      "4": 312
+    },
+    "final_large_central_md": {
+      "0": 523,
+      "1": 668
+    },
+    "note": "Captured transmissions include retransmissions; incomplete capture is not packet-loss evidence."
+  },
+  {
+    "start_packet": 39935,
+    "end_packet": 48461,
+    "median_interval_ms": 10.001,
+    "active_events": 1093,
+    "observed_large_pdu_per_event": {
+      "4": 288,
+      "1": 217,
+      "2": 14,
+      "3": 14,
+      "5": 560
+    },
+    "final_large_central_md": {
+      "1": 531,
+      "0": 562
+    },
+    "note": "Captured transmissions include retransmissions; incomplete capture is not packet-loss evidence."
+  },
+  {
+    "start_packet": 50542,
+    "end_packet": 59063,
+    "median_interval_ms": 10.001,
+    "active_events": 1099,
+    "observed_large_pdu_per_event": {
+      "4": 271,
+      "1": 231,
+      "5": 572,
+      "2": 12,
+      "3": 13
+    },
+    "final_large_central_md": {
+      "1": 530,
+      "0": 569
+    },
+    "note": "Captured transmissions include retransmissions; incomplete capture is not packet-loss evidence."
+  }
+]

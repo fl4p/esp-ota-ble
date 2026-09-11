@@ -1,0 +1,14 @@
+SETUP OTAB AUTH ok
+SETUP BENCH interval requested; inspect link after settling
+SETUP BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2
+BEFORE {"base": "09c21490f2e560b97ce1933606affad47133af591ad85ea16685d21d0d4f16c5", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}
+LINK mtu=515 max_write=512 chunk=495
+[0.397] OTAB RING 262144
+[0.398] OTAB READY part=app1 size=754624 xform=raw out=754624
+[22.424] OTAB STAT write_ms=2327 calls=1281 erase_ms=2006 out=754624
+[22.628] OTAB SKIP kept=0 wrote=185 erases=11 erase_ms=2006
+[22.629] OTAB FLASH mode=internal program_bytes=754624 erase_bytes=757760
+[22.629] OTAB TIME begin_ms=219 program_ms=2314 compare_us=0
+[22.629] OTAB OK rebooting
+SETUP OTAB AUTH ok
+RESULT {"after": {"base": "f408a9dc9eb8a54e57a26d1ae3792059e1bfdad8e5991003dc0ba0d7b5c51de0", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "before": {"base": "09c21490f2e560b97ce1933606affad47133af591ad85ea16685d21d0d4f16c5", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "burst": 1, "bytes": 754624, "chunk": 495, "elapsed": 23.449154375004582, "flash": {"erase_bytes": "757760", "mode": "internal", "program_bytes": "754624"}, "image": "/tmp/node_X.bin", "image_kB_s": 32.18128841372569, "kB_s": 32.18128841372569, "name": "farmnode-202A29", "negotiated_setup": ["OTAB AUTH ok", "BENCH interval requested; inspect link after settling", "BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2"], "paced_writes": 1518, "payload_build_s": 7.542083039879799e-06, "purpose": "measure", "real_write": true, "setup": ["interval 8", "link"], "skip": {"erase_ms": "2006", "erases": "11", "kept": "0", "wrote": "185"}, "stats": {"calls": "1281", "erase_ms": "2006", "out": "754624", "write_ms": "2327"}, "timing": {"begin_ms": "219", "compare_us": "0", "program_ms": "2314"}, "transfer_hint": true, "verified": true, "wire": "raw", "wire_bytes": 754624}

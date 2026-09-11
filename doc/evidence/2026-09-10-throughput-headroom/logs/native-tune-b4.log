@@ -1,0 +1,20 @@
+NATIVE DISCOVER rssi=-32
+[0.000] OTAB AUTH ok
+[0.000] BENCH interval requested; inspect link after settling
+[0.000] BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0
+[0.000] BENCH BUFFERS msys1=50 size=256 msys2=96 acl=96 ce=2
+[0.000] OTAB INFO run=app1 slot=1572864
+[0.000] OTAB BASE 868010a3e909cbf796bfc6cfc7ea5312514fe180bd2df0526f419449c39fbbbc
+[0.000] OTAB RESUME none
+[0.000] OTAB XFORM raw,tamp,delta
+[0.407] OTAB RING 262144
+[0.407] OTAB READY part=app0 size=754624 xform=raw out=754624
+[38.178] OTAB FAIL aborted
+NATIVE FAIL OTAB FAIL aborted
+[38.201] OTAB FAIL stalled
+
+Traceback (most recent call last):
+  File "/Users/fab/o2p-push/ota-throughput-next/run_native_tuned.py", line 37, in <module>
+    assert proc.returncode==0 and len(rows)==1,path
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: /Users/fab/o2p-push/ota-throughput-next/native-tune-b4-native.log

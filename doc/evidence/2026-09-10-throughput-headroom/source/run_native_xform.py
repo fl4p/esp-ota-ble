@@ -1,0 +1,54 @@
+import argparse,asyncio,hashlib,json,re,subprocess,sys
+from pathlib import Path
+from types import SimpleNamespace
+R=Path(__file__).resolve().parent
+sys.path.insert(0,str(R/'node/tools'))
+import bench_ble_ota as B
+
+async def verify():
+    args=SimpleNamespace(name='farmnode-202A29',auth='BEEF',chunk=495,burst=1,
+                         setup=[],ready_event=False,poll_s=None)
+    await asyncio.sleep(4)
+    for attempt in range(4):
+        try:
+            link=await B.connect(args,setup=False)
+            try:return await B.O.query_info(link)
+            finally:await link.release()
+        except Exception as exc:
+            print('VERIFY RETRY',repr(exc),flush=True);await asyncio.sleep(2)
+    return None
+
+ap=argparse.ArgumentParser();ap.add_argument('label');ap.add_argument('name')
+ap.add_argument('transform',choices=('tamp','delta'))
+ap.add_argument('--image',default='/tmp/node_Y.bin');args=ap.parse_args()
+ids=json.loads((R/'build-identities.json').read_text())
+image=Path(args.image).read_bytes();assert B.O.image_id(image)
+base=ids[args.label]['image_sha']
+payload=(B.O.build_tamp_payload(image) if args.transform=='tamp' else
+         B.O.build_delta_payload(str(R/('node_'+args.label+'.bin')),image,expect_base=base))
+payload_path=R/(args.name+'.payload');assert not payload_path.exists()
+payload_path.write_bytes(payload)
+path=R/(args.name+'-native.log');assert not path.exists(),path
+with path.open('w') as f:
+    proc=subprocess.run([str(R/'native_push_xform'),str(payload_path),base,args.transform,str(len(image))],
+                        stdout=f,stderr=subprocess.STDOUT,timeout=200)
+content=path.read_text();print(content,flush=True)
+rows=[json.loads(s[14:]) for s in content.splitlines() if s.startswith('NATIVE_RESULT ')]
+assert proc.returncode==0 and len(rows)==1,path
+native=rows[0];after=asyncio.run(verify())
+def fields(prefix):
+    matches=[s for _,s in native['lines'] if s.startswith(prefix)]
+    return dict(re.findall(r'(\w+)=(\S+)',matches[0])) if len(matches)==1 else {}
+flash=fields('OTAB FLASH ')
+verified=B.O.image_is_running(after,image) is True and after['run']!=native['before']['run']
+real=B.flash_full_rewrite(flash,len(image))
+row=dict(native,image=args.image,after=after,verified=verified,real_write=real,
+         flash=flash,stats=fields('OTAB STAT '),timing=fields('OTAB TIME '),
+         skip=fields('OTAB SKIP '),wire=args.transform,wire_bytes=len(payload),
+         chunk=495,burst=1,kB_s=len(payload)/native['elapsed']/1000,
+         image_kB_s=len(image)/native['elapsed']/1000,purpose='measure',
+         source_sha256={name:hashlib.sha256((R/name).read_bytes()).hexdigest()
+            for name in ('native_push_xform.swift','run_native_xform.py','node/tools/bench_ble_ota.py','esp-ota-ble/host/esp_ota_ble.py')})
+print('RESULT',json.dumps({k:v for k,v in row.items() if k!='lines'},sort_keys=True),flush=True)
+with (R/'native-matrix.jsonl').open('a') as f:f.write(json.dumps(row,sort_keys=True)+'\n')
+assert verified and real and native['payload_sha256']==hashlib.sha256(payload).hexdigest(),row

@@ -1,0 +1,33 @@
+SETUP OTAB AUTH ok
+SETUP BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2
+SETUP BENCH DLE tx=251 tx_us=17040 rx=251 rx_us=2120
+BEFORE {"base": "df7cd2b4122a03c6b2747295c019c11563d076046f3e0769d369a9ddbb94c14a", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}
+LINK mtu=515 max_write=512 chunk=495
+[0.434] OTAB RING 262144
+[0.438] OTAB READY part=app1 size=754624 xform=raw out=754624
+Traceback (most recent call last):
+  File "/Users/fab/o2p-push/ota-throughput-next/node/tools/bench_ble_ota.py", line 189, in <module>
+    asyncio.run(run(ap.parse_args()))
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/runners.py", line 205, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/runners.py", line 128, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/base_events.py", line 720, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/Users/fab/o2p-push/ota-throughput-next/node/tools/bench_ble_ota.py", line 122, in run
+    ok = await O.push_image(link,payload,xform=wire,out_size=len(data) if wire!='raw' else None,on_line=log,flush_timeout=40,
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                            credit_timeout=10,credit_retries=2)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/fab/o2p-push/ota-throughput-next/esp-ota-ble/host/esp_ota_ble.py", line 1245, in push_image
+    await link.write_fw(data[sent:sent + n])
+  File "/Users/fab/o2p-push/ota-throughput-next/esp-ota-ble/host/esp_ota_ble.py", line 515, in write_fw
+    await self._await_writable()
+  File "/Users/fab/o2p-push/ota-throughput-next/node/tools/bench_ble_ota.py", line 73, in poll_writable
+    if time.monotonic()>=deadline:raise RuntimeError('CoreBluetooth remained unwritable')
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: CoreBluetooth remained unwritable

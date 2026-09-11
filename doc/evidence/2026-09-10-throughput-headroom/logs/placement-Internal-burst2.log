@@ -1,0 +1,14 @@
+SETUP OTAB AUTH ok
+SETUP BENCH interval requested; inspect link after settling
+SETUP BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2
+BEFORE {"base": "09c21490f2e560b97ce1933606affad47133af591ad85ea16685d21d0d4f16c5", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}
+LINK mtu=515 max_write=512 chunk=495
+[0.401] OTAB RING 262144
+[0.401] OTAB READY part=app1 size=754624 xform=raw out=754624
+[10.581] OTAB STAT write_ms=2376 calls=1201 erase_ms=2073 out=754624
+[10.800] OTAB SKIP kept=0 wrote=185 erases=11 erase_ms=2073
+[10.800] OTAB FLASH mode=internal program_bytes=754624 erase_bytes=757760
+[10.800] OTAB TIME begin_ms=222 program_ms=2363 compare_us=0
+[10.800] OTAB OK rebooting
+SETUP OTAB AUTH ok
+RESULT {"after": {"base": "f408a9dc9eb8a54e57a26d1ae3792059e1bfdad8e5991003dc0ba0d7b5c51de0", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "before": {"base": "09c21490f2e560b97ce1933606affad47133af591ad85ea16685d21d0d4f16c5", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "burst": 2, "bytes": 754624, "chunk": 495, "elapsed": 11.62115695909597, "flash": {"erase_bytes": "757760", "mode": "internal", "program_bytes": "754624"}, "image": "/tmp/node_X.bin", "image_kB_s": 64.93535907449817, "kB_s": 64.93535907449817, "name": "farmnode-202A29", "negotiated_setup": ["OTAB AUTH ok", "BENCH interval requested; inspect link after settling", "BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2"], "paced_writes": 754, "payload_build_s": 1.7909333109855652e-06, "purpose": "measure", "real_write": true, "setup": ["interval 8", "link"], "skip": {"erase_ms": "2073", "erases": "11", "kept": "0", "wrote": "185"}, "stats": {"calls": "1201", "erase_ms": "2073", "out": "754624", "write_ms": "2376"}, "timing": {"begin_ms": "222", "compare_us": "0", "program_ms": "2363"}, "transfer_hint": true, "verified": true, "wire": "raw", "wire_bytes": 754624}

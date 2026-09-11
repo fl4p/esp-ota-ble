@@ -1,0 +1,8 @@
+{
+  "sdk_sha": "9b815f9161a9c0d92af02f0438e8dacdb9d85e166cf5f1a8d51909668e8edf6c",
+  "labels": [
+    "Graceful",
+    "Core1Grace"
+  ],
+  "note": "SDK snapshots collected after the builds; header matches the preceding XipCore1 and following Coc1000 build snapshots. All use the same private XIP SDK; builds did not rebuild or change that SDK."
+}

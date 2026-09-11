@@ -1,0 +1,22 @@
+DISCOVERY adapter=hci0 address=7C:4F:AD:20:2A:29 rssi=-40
+/home/fab/ota-throughput-20260911/venv/lib/python3.11/site-packages/bleak/backends/bluezdbus/client.py:646: UserWarning: Using default MTU value. Call _acquire_mtu() or set _mtu_size first to avoid this warning.
+  warnings.warn(
+SETUP OTAB AUTH ok
+SETUP BENCH interval requested; inspect link after settling
+SETUP BENCH LINK interval=6 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0
+SETUP BENCH DLE tx=251 tx_us=2120 rx=251 rx_us=2120
+SETUP BENCH HOST AcquireWrite mtu=517 socket_type=5
+BEFORE {"base": "211ea7abf09afb50c982f7caa027d8eaf55a037c562be385efe928cfacad99d3", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}
+LINK mtu=517 max_write=514 chunk=495
+[0.412] OTAB RING 262144
+[0.412] OTAB READY part=app1 size=754624 xform=raw out=754624
+[27.748] OTAB STAT write_ms=2337 calls=1447 erase_ms=2020 out=754624
+[27.944] OTAB SKIP kept=0 wrote=185 erases=11 erase_ms=2020
+[27.944] OTAB FLASH mode=internal program_bytes=754624 erase_bytes=757760
+[27.944] OTAB TIME begin_ms=217 program_ms=2328 compare_us=0
+[27.944] OTAB OK rebooting
+DISCOVERY adapter=hci0 address=7C:4F:AD:20:2A:29 rssi=-30
+SETUP OTAB AUTH ok
+SETUP OTAB AUTH ok
+SETUP BENCH HOST AcquireWrite mtu=517 socket_type=5
+RESULT {"adapter": "hci0", "after": {"base": "f408a9dc9eb8a54e57a26d1ae3792059e1bfdad8e5991003dc0ba0d7b5c51de0", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "before": {"base": "211ea7abf09afb50c982f7caa027d8eaf55a037c562be385efe928cfacad99d3", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "burst": 1, "bytes": 754624, "chunk": 495, "elapsed": 28.763149747857824, "flash": {"erase_bytes": "757760", "mode": "internal", "program_bytes": "754624"}, "host": "rpi", "image": "node_X.bin", "image_kB_s": 26.235791511539922, "kB_s": 26.235791511539922, "name": "farmnode-202A29", "negotiated_setup": ["OTAB AUTH ok", "BENCH interval requested; inspect link after settling", "BENCH LINK interval=6 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0", "BENCH DLE tx=251 tx_us=2120 rx=251 rx_us=2120", "BENCH HOST AcquireWrite mtu=517 socket_type=5"], "paced_writes": 0, "payload_build_s": 1.3890676200389862e-06, "poll_s": null, "purpose": "measure", "ready_callbacks": null, "ready_event": false, "real_write": true, "setup": ["interval 6", "link", "dleinfo"], "skip": {"erase_ms": "2020", "erases": "11", "kept": "0", "wrote": "185"}, "stats": {"calls": "1447", "erase_ms": "2020", "out": "754624", "write_ms": "2337"}, "timing": {"begin_ms": "217", "compare_us": "0", "program_ms": "2328"}, "transfer_hint": true, "verified": true, "wire": "raw", "wire_bytes": 754624, "write_fd": true}

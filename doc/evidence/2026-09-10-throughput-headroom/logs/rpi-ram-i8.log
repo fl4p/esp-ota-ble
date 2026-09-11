@@ -1,0 +1,11 @@
+/home/fab/ota-throughput-20260911/venv/lib/python3.11/site-packages/bleak/backends/bluezdbus/client.py:646: UserWarning: Using default MTU value. Call _acquire_mtu() or set _mtu_size first to avoid this warning.
+  warnings.warn(
+SETUP OTAB AUTH ok
+SETUP BENCH interval requested; inspect link after settling
+SETUP BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0
+SETUP BENCH BUFFERS msys1=50 size=256 msys2=96 acl=96
+SETUP BENCH DLE tx=251 tx_us=2120 rx=251 rx_us=2120
+BENCH RAM ready
+BENCH RAM bytes=1048576 us=50481343 sha=329b0d7782a629042c674bc7d50474b6b2e1ac1d60d0e2a26153ab3d7bff7106
+BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0
+RESULT {"after": {"base": "211ea7abf09afb50c982f7caa027d8eaf55a037c562be385efe928cfacad99d3", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "before": {"base": "211ea7abf09afb50c982f7caa027d8eaf55a037c562be385efe928cfacad99d3", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "burst": 1, "bytes": 1048576, "chunk": 495, "fields": {"bytes": "1048576", "sha": "329b0d7782a629042c674bc7d50474b6b2e1ac1d60d0e2a26153ab3d7bff7106", "us": "50481343"}, "host_elapsed": 50.551868692971766, "host_kB_s": 20.742576429143632, "interval": 8, "label": "XipQuiet", "poll_s": null, "post_link": "BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0", "purpose": "ram-only", "ready_callbacks": null, "ready_event": false, "receiver_kB_s": 20.7715551466212, "setup": ["OTAB AUTH ok", "BENCH interval requested; inspect link after settling", "BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0", "BENCH BUFFERS msys1=50 size=256 msys2=96 acl=96", "BENCH DLE tx=251 tx_us=2120 rx=251 rx_us=2120"], "verified": true}

@@ -190,6 +190,13 @@ were not isolated: do not attribute the whole gain to one setting or promise it 
 Require final sector counts and post-boot image identity for a full-write benchmark;
 substantial `erase_ms` alone can conceal skipped tail sectors.
 
+The [follow-up throughput experiments](doc/2026-09-10-throughput-headroom.md) reached
+**87.17 raw kB/s mean over three complete rewrites**, approximately twice that baseline,
+and over **120 image kB/s** for transformed full rewrites. They cover flash batching,
+PSRAM execution, controller/host settings, CoC, and the additional Pi centrals.
+The archived receiver variants and native sender are bench experiments; those figures
+are not performance guarantees for this library's default configuration.
+
 ## Tests
 
 ```

@@ -1,0 +1,22 @@
+{
+  "link-matrix-air.csv": {
+    "raw_sha256": "2b19ba121404956ce9868c7c5682815133315ac5ef398f13dac88cedd5d6c676",
+    "rows": 26872,
+    "archived": "metadata and derived RAM markers; payload bytes remain in private bench directory"
+  },
+  "fast-link-air.csv": {
+    "raw_sha256": "9cff3f609916da7375bdc9edb6744a210ac3b95c536f051df79457dc2b51a0f2",
+    "rows": 52578,
+    "archived": "metadata and derived RAM markers; payload bytes remain in private bench directory"
+  },
+  "queue-air.csv": {
+    "raw_sha256": "734543d8b8a58bf9bd2e7055179471fd621605da00fbe0e41df76c7e2396d247",
+    "rows": 101346,
+    "archived": "metadata and derived RAM markers; payload bytes remain in private bench directory"
+  },
+  "coc-air.csv": {
+    "raw_sha256": "92df833bc402324658e550f135ae8d95c81df01830ef88633ca54d5fb15ce505",
+    "rows": 54450,
+    "archived": "metadata and derived RAM markers; payload bytes remain in private bench directory"
+  }
+}

@@ -1,0 +1,12 @@
+SETUP OTAB AUTH ok
+BEFORE {"base": "6901b9f82ceada11a6d6cea7cc3c2c55ae6359e1c928ef1dc8be7d059107119f", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}
+LINK mtu=515 max_write=512 chunk=495
+delta against node_Blocks2.bin
+[0.444] OTAB RING 262144
+[0.444] OTAB READY part=app0 size=32348 xform=delta out=722016
+[5.724] OTAB STAT write_ms=5128 calls=16 erase_ms=1679 out=722016
+[5.920] OTAB FLASH mode=blocks program_bytes=722016 erase_bytes=724992
+[5.921] OTAB TIME begin_ms=225 program_ms=3253 compare_us=0
+[5.921] OTAB OK rebooting
+SETUP OTAB AUTH ok
+RESULT {"after": {"base": "a047233a7af6e4a96e884fdb91c34f07a9ed2467401955e29c396e6805045801", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "before": {"base": "6901b9f82ceada11a6d6cea7cc3c2c55ae6359e1c928ef1dc8be7d059107119f", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "burst": 1, "bytes": 722016, "chunk": 495, "elapsed": 6.727551958989352, "flash": {"erase_bytes": "724992", "mode": "blocks", "program_bytes": "722016"}, "image": "/Users/fab/o2p-push/ota-throughput-next/node_Profile.bin", "image_kB_s": 107.32224803336413, "kB_s": 4.8082869069151695, "name": "farmnode-202A29", "negotiated_setup": ["OTAB AUTH ok"], "paced_writes": 65, "payload_build_s": 0.24616025004070252, "purpose": "install", "real_write": true, "setup": [], "skip": {}, "stats": {"calls": "16", "erase_ms": "1679", "out": "722016", "write_ms": "5128"}, "timing": {"begin_ms": "225", "compare_us": "0", "program_ms": "3253"}, "transfer_hint": true, "verified": true, "wire": "delta", "wire_bytes": 32348}

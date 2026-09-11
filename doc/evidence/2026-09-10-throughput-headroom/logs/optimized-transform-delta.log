@@ -1,0 +1,14 @@
+SETUP OTAB AUTH ok
+SETUP BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0
+BEFORE {"base": "868010a3e909cbf796bfc6cfc7ea5312514fe180bd2df0526f419449c39fbbbc", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}
+LINK mtu=515 max_write=512 chunk=495
+delta against node_Ce2.bin
+[0.430] OTAB RING 262144
+[0.430] OTAB READY part=app0 size=253881 xform=delta out=757104
+[5.821] OTAB STAT write_ms=5213 calls=124 erase_ms=2181 out=757104
+[6.011] OTAB SKIP kept=0 wrote=185 erases=11 erase_ms=2181
+[6.011] OTAB FLASH mode=internal program_bytes=757104 erase_bytes=757760
+[6.011] OTAB TIME begin_ms=213 program_ms=2527 compare_us=0
+[6.011] OTAB OK rebooting
+SETUP OTAB AUTH ok
+RESULT {"adapter": null, "after": {"base": "545e80b9a275b0a47d56fb3b60a3e772a9b688418e9a66baa855139e44e56b60", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "before": {"base": "868010a3e909cbf796bfc6cfc7ea5312514fe180bd2df0526f419449c39fbbbc", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "burst": 1, "bytes": 757104, "chunk": 495, "elapsed": 6.832454040995799, "flash": {"erase_bytes": "757760", "mode": "internal", "program_bytes": "757104"}, "host": "fmb-2.local", "image": "/tmp/node_Y.bin", "image_kB_s": 110.80996600302862, "kB_s": 37.158098463110626, "name": "farmnode-202A29", "negotiated_setup": ["OTAB AUTH ok", "BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0"], "paced_writes": 512, "payload_build_s": 0.3699462920194492, "poll_s": null, "purpose": "measure", "ready_callbacks": null, "ready_event": false, "real_write": true, "setup": ["link"], "skip": {"erase_ms": "2181", "erases": "11", "kept": "0", "wrote": "185"}, "stats": {"calls": "124", "erase_ms": "2181", "out": "757104", "write_ms": "5213"}, "timing": {"begin_ms": "213", "compare_us": "0", "program_ms": "2527"}, "transfer_hint": true, "verified": true, "wire": "delta", "wire_bytes": 253881, "write_fd": false}

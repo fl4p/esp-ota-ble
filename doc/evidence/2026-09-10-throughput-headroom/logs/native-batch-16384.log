@@ -1,0 +1,20 @@
+src/ota_xform.cpp:34:25: warning: unused variable 'TAMP_WINDOW_SIZE' [-Wunused-const-variable]
+   34 | static constexpr size_t TAMP_WINDOW_SIZE = 1u << TAMP_WINDOW_BITS;
+      |                         ^~~~~~~~~~~~~~~~
+src/ota_xform.cpp:36:25: warning: unused variable 'XFORM_OUT_SLICE' [-Wunused-const-variable]
+   36 | static constexpr size_t XFORM_OUT_SLICE = 512;
+      |                         ^~~~~~~~~~~~~~~
+2 warnings generated.
+  FAIL [esp_ota_write fails mid-stream] test/host-stub/ota_ble-test.cpp:701: no write FAIL
+  FAIL [esp_ota_write fails mid-stream] test/host-stub/ota_ble-test.cpp:702: still active after a write failure
+  FAIL [esp_ota_write fails mid-stream] test/host-stub/ota_ble-test.cpp:703: esp_ota_abort not called
+  FAIL [esp_ota_write fails mid-stream] test/host-stub/ota_ble-test.cpp:705: sampling not released after a write failure
+  FAIL [esp_ota_write fails mid-stream] test/host-stub/ota_ble-test.cpp:90: session still active at end of case
+  FAIL [esp_ota_write fails mid-stream] test/host-stub/ota_ble-test.cpp:91: staging ring leaked (2 live allocs)
+  FAIL [esp_ota_write fails mid-stream] test/host-stub/ota_ble-test.cpp:92: leaked 1 IDF OTA operation(s)
+  FAIL [esp_ota_write fails mid-stream] test/host-stub/ota_ble-test.cpp:101: quiesce unbalanced (1 halt / 0 release)
+  FAIL [esp_ota_end fails] test/host-stub/ota_ble-test.cpp:718: no end FAIL
+  FAIL [esp_ota_end fails] test/host-stub/ota_ble-test.cpp:91: staging ring leaked (-2 live allocs)
+  FAIL [esp_ota_end fails] test/host-stub/ota_ble-test.cpp:92: leaked -1 IDF OTA operation(s)
+  FAIL [esp_ota_end fails] test/host-stub/ota_ble-test.cpp:93: wrote into flash that was never erased
+  FAIL [esp_ota_end fails] test/host-stub/ota_ble-test.cpp:101: quiesce unbalanced (0 halt / 1 release)

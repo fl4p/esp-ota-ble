@@ -1,0 +1,15 @@
+tamp: /Users/fab/dev/pv/fugu-mppt-firmware/components/tamp/tamp/_c_src
+--- erase strategy: sequential writes
+ota_ble host tests
+all checks passed
+--- erase strategy: erase-ahead
+ota_ble host tests
+all checks passed
+--- erase strategy: skip identical sectors
+ota_ble host tests
+all checks passed
+.....
+----------------------------------------------------------------------
+Ran 5 tests in 0.000s
+
+OK

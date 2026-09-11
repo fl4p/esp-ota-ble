@@ -1,0 +1,18 @@
+NATIVE DISCOVER rssi=-33
+[0.000] OTAB AUTH ok
+[0.000] BENCH interval requested; inspect link after settling
+[0.000] BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0
+[0.000] BENCH BUFFERS msys1=50 size=256 msys2=96 acl=96 ce=2
+[0.000] OTAB INFO run=app1 slot=1572864
+[0.000] OTAB BASE 9f8abf18b2ad59476c71f4c3ab757b6e9bc3fb8b7f5f5a95cb64263f015ba587
+[0.000] OTAB RESUME none
+[0.000] OTAB XFORM raw,tamp,delta
+[0.412] OTAB RING 262144
+[0.412] OTAB READY part=app0 size=529380 xform=tamp out=757104
+[5.904] OTAB STAT write_ms=2864 calls=367 erase_ms=2168 out=757104
+[6.103] OTAB SKIP kept=0 wrote=185 erases=11 erase_ms=2168
+[6.104] OTAB FLASH mode=internal program_bytes=757104 erase_bytes=757760
+[6.104] OTAB TIME begin_ms=220 program_ms=2549 compare_us=0
+[6.104] OTAB OK rebooting
+[6.104] BENCH REBOOT graceful=1
+NATIVE_RESULT {"backend":"native-CoreBluetooth","before":{"base":"9f8abf18b2ad59476c71f4c3ab757b6e9bc3fb8b7f5f5a95cb64263f015ba587","run":"app1","slot":1572864},"bytes":529380,"elapsed":6.1575521670000004,"image_bytes":757104,"lines":[[0,"OTAB AUTH ok"],[0,"BENCH interval requested; inspect link after settling"],[0,"BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0"],[0,"BENCH BUFFERS msys1=50 size=256 msys2=96 acl=96 ce=2"],[0,"OTAB INFO run=app1 slot=1572864"],[0,"OTAB BASE 9f8abf18b2ad59476c71f4c3ab757b6e9bc3fb8b7f5f5a95cb64263f015ba587"],[0,"OTAB RESUME none"],[0,"OTAB XFORM raw,tamp,delta"],[0.41220695899999998,"OTAB RING 262144"],[0.41234791700000001,"OTAB READY part=app0 size=529380 xform=tamp out=757104"],[0.41237991699999998,"OTAB CRED 262144"],[1.0834947500000001,"OTAB CRED 305209"],[1.6337420840000001,"OTAB PROG 97515\/529380"],[1.633751459,"OTAB CRED 359659"],[1.9547477499999999,"OTAB CRED 391834"],[2.2839684170000001,"OTAB PROG 164340\/529380"],[2.2839825839999999,"OTAB CRED 426484"],[2.6336542500000002,"OTAB CRED 464104"],[2.964557584,"OTAB PROG 233145\/529380"],[2.964657667,"OTAB CRED 495289"],[3.0940113340000002,"OTAB CRED 520534"],[3.533671709,"OTAB CRED 529380"],[4.2137454170000002,"OTAB PROG 312840\/529380"],[4.7638527919999998,"OTAB PROG 420750\/529380"],[5.4040427500000003,"OTAB PROG 488070\/529380"],[5.9034132499999998,"OTAB PROG 529380\/529380"],[5.9035407089999996,"OTAB STAT write_ms=2864 calls=367 erase_ms=2168 out=757104"],[6.1034234999999999,"OTAB SKIP kept=0 wrote=185 erases=11 erase_ms=2168"],[6.103630667,"OTAB FLASH mode=internal program_bytes=757104 erase_bytes=757760"],[6.1036678340000003,"OTAB TIME begin_ms=220 program_ms=2549 compare_us=0"],[6.1036881249999997,"OTAB OK rebooting"],[6.1037059170000001,"BENCH REBOOT graceful=1"]],"payload_sha256":"53e5f8e8499bc960d1676d7aeb9ded5600054286abb8af79446c94bb14082cb8","ready_callbacks":1070,"sent":529380,"transfer_hint":true,"wire":"tamp","writes":1070}

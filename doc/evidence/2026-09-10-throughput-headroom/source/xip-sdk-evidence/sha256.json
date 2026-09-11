@@ -1,0 +1,9 @@
+{
+  "bleota.cpp": "2c391165eda52485c8476321d914ac44994bedfcb6f069b4ce26de096fbef714",
+  "sdkconfig.h": "9b815f9161a9c0d92af02f0438e8dacdb9d85e166cf5f1a8d51909668e8edf6c",
+  "platformio.ini": "7fd549c7fb007da3d6a706acecb373eae3bd3276da48132555777f2e3698ec13",
+  "ota_ble.cpp": "9685faf3831572bdf9d60c2685e42efc6d339944f6400bf3227f9d166d7d00b9",
+  "package.json": "636cf070d77015fade084ec944b8ab3951764e37c2cb6a93ea207c640d4cbedc",
+  "sdkconfig.defaults": "c1a15f0de7cab305e6da2fbd4d0fab46e365a46c71b70629e05ff1e566d27df0",
+  "spi_flash_os_func_app.c": "e363fe2f4596a85e8abe44c15853b07b73ec7e14b48c72ed9e6dfa6bd963e295"
+}

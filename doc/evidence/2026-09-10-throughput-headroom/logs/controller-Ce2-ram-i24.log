@@ -1,0 +1,9 @@
+SETUP OTAB AUTH ok
+SETUP BENCH interval requested; inspect link after settling
+SETUP BENCH LINK interval=24 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0
+SETUP BENCH BUFFERS msys1=50 size=256 msys2=96 acl=96 ce=2
+SETUP BENCH DLE tx=251 tx_us=17040 rx=251 rx_us=2120
+BENCH RAM ready
+BENCH RAM bytes=262144 us=7979323 sha=69093f3ec887d42ddb5c1c46dfcc4468bb2341e6e3f6ca45f1d7f691a8415f81
+BENCH LINK interval=24 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0
+RESULT {"adapter": null, "after": {"base": "868010a3e909cbf796bfc6cfc7ea5312514fe180bd2df0526f419449c39fbbbc", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "before": {"base": "868010a3e909cbf796bfc6cfc7ea5312514fe180bd2df0526f419449c39fbbbc", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "burst": 1, "bytes": 262144, "chunk": 495, "fields": {"bytes": "262144", "sha": "69093f3ec887d42ddb5c1c46dfcc4468bb2341e6e3f6ca45f1d7f691a8415f81", "us": "7979323"}, "host": "fmb-2.local", "host_elapsed": 8.093468958046287, "host_kB_s": 32.3895725502702, "interval": 24, "label": "Ce2", "poll_s": null, "post_link": "BENCH LINK interval=24 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0", "purpose": "ram-only", "ready_callbacks": null, "ready_event": false, "receiver_kB_s": 32.85291245886399, "setup": ["OTAB AUTH ok", "BENCH interval requested; inspect link after settling", "BENCH LINK interval=24 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0", "BENCH BUFFERS msys1=50 size=256 msys2=96 acl=96 ce=2", "BENCH DLE tx=251 tx_us=17040 rx=251 rx_us=2120"], "verified": true, "write_fd": false}

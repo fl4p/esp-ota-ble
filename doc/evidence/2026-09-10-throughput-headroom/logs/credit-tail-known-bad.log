@@ -1,0 +1,4 @@
+final-grant announcements after 32 drains: 33
+  FAIL [unchanged final credit is not emitted for every drain] test/host-stub/credit-tail-test.cpp:16: unchanged final grant flooded status
+  FAIL [unchanged final credit is not emitted for every drain] test/host-stub/credit-tail-test.cpp:18: repeat arrived early
+  FAIL [unchanged final credit is not emitted for every drain] test/host-stub/credit-tail-test.cpp:20: timed lost-credit recovery disappeared

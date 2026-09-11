@@ -1,0 +1,948 @@
+diff --git a/platformio.ini b/platformio.ini
+index 982eaf5..b61ffe2 100644
+--- a/platformio.ini
++++ b/platformio.ini
+@@ -101,7 +101,7 @@ lib_deps =
+ 	; be at" is not an acceptable answer to which receiver its firmware contains
+ 	; - and a bare branch URL is cached, so a stale copy is invisible in the
+ 	; build log. Bump deliberately.
+-	https://github.com/fl4p/esp-ota-ble.git#2233857da82eb1da6d94a743aa04c16b1f5c70c3
++	symlink:///Users/fab/dev/pv/esp-ota-ble   ; LOCAL, bench only - do not commit
+ 	h2zero/NimBLE-Arduino @ ^2.5.1
+ build_flags =
+ 	; The S3-Zero has no USB-UART chip: Serial goes to UART0 (GP43/44) unless
+@@ -532,6 +532,7 @@ build_flags =
+ 	-DPROTO_BLE_BENCH
+ 	-DPROTO_BUS_OFF
+ 	-DPROTO_NO_SLEEP
++	-DPROTO_BENCH_CONFIRM_OTA=1
+ 
+ 
+ ; LONG BLE WINDOW. Normal node in every other respect: LoRaWAN, the RS-485 bus
+@@ -590,3 +591,22 @@ build_flags =
+ 	-DCTRL_MAX_SESSION_MIN=255
+ 	-DBLE_OTA_MAX_UP_MS=15300000UL
+ 	-DBLE_OTA_MAX_TOTAL_MS=604800000UL
++
++[env:esp32s3_psrambench]
++; BENCH ONLY - the second ESP32-S3 (MAC 7c:4f:ad:20:2a:28), which HAS 8 MB PSRAM.
++; farm-node-01 does NOT, so anything measured here must be re-checked there before
++; it is claimed for the deployed node.
++extends = env:esp32s3_blebench
++board_build.arduino.memory_type = qio_opi
++; BENCH EXPERIMENT 2026-09-10, throughput only - NOT a shipping change.
++build_flags =
++	${env:esp32s3_blebench.build_flags}
++	-DBOARD_HAS_PSRAM
++
++; Retain the optimization experiment as an explicitly selected bench build.
++[env:esp32s3_psrambench_o2]
++extends = env:esp32s3_psrambench
++build_unflags = -Os
++build_flags =
++	${env:esp32s3_psrambench.build_flags}
++	-O2
+diff --git a/src/bleota.cpp b/src/bleota.cpp
+index 2eac9f9..fdfa4e1 100644
+--- a/src/bleota.cpp
++++ b/src/bleota.cpp
+@@ -193,6 +193,25 @@ static uint32_t conn_at       = 0;
+ static uint16_t conn_handle   = BLE_HS_CONN_HANDLE_NONE;
+ static uint16_t peer_mtu      = 23;
+ static bool     flash_busy    = false;
++static std::atomic<bool> serial_driving{false};
++static std::atomic<unsigned> link_tune_stage{0};
++static std::atomic<bool> link_params_seen{false};
++static uint32_t link_tune_at = 0;  // app task only
++
++/* RESCUE RESET OVER BLE. Set by the `reset` verb on the NimBLE host task,
++ * drained by ble_ota_tick() on the app task - the same latch shape as
++ * cadence/telem/claim, and for a stronger reason than theirs: rebooting from
++ * inside a GATT callback tears the stack down from within its own task.
++ *
++ * WHY IT EXISTS. The ESP32-S3 USB-Serial-JTAG endpoint dies while the chip
++ * keeps running - five times on 2026-09-10 alone - and when it does, esptool
++ * answers on none of default_reset/usb_reset/no_reset and the app console is
++ * silent. The chip is fine; only the USB peripheral is wedged, and a reset
++ * re-enumerates it. Without this the only way back is a human unplugging the
++ * cable, which blocked flashing and erase_region repeatedly through one
++ * session. BLE stayed up through every one of those deaths, so BLE is the
++ * rescue channel. */
++static std::atomic<bool> reset_pending{false};
+ 
+ static uint16_t auth_nonce    = 0;
+ /* ATOMIC because it is no longer host-task-only: telem_holding_window() reads
+@@ -343,18 +362,25 @@ static void tx_append_line(const char *line)
+ 
+ static void ota_status_hook(OtaBleLevel level, const char *line)
+ {
+-    /* Mirrored to the console as well as the client: during a bench push the
+-     * USB console is often the only view when the BLE link is the thing
+-     * misbehaving. Severity is preserved on the wire by the OTAB FAIL prefix
+-     * the receiver already emits. */
+-    Serial.printf("%s %s\n", level == OtaBleLevel::Info ? "ble:" : "!! ble:", line);
+-    tx_append_line(line);
++    // Protocol replies go to their transport. Mirroring every BLE credit to
++    // an unread USB console can block HWCDC for seconds inside the consumer.
++    if (serial_driving.load(std::memory_order_acquire))
++        Serial.printf("%s %s\n", level == OtaBleLevel::Info ? "ble:" : "!! ble:", line);
++    else
++        tx_append_line(line);
+ }
+ 
+ static void ota_quiesce_hook(bool halt) { flash_busy = halt; }
+ 
++static void drain_tx(void);
++
+ static void ota_restart_hook(void)
+ {
++    // Preserve the final erase/skip accounting and digest-success reply.
++    if (!serial_driving.load(std::memory_order_acquire)) {
++        drain_tx();
++        delay(50);
++    }
+     node_prepare_restart();
+     esp_restart();
+ }
+@@ -445,8 +471,26 @@ class SrvCb : public NimBLEServerCallbacks {
+         Serial.printf("ble: client connected: %s (handle %u)\n",
+                       info.getAddress().toString().c_str(),
+                       (unsigned)conn_handle);
++
++        // Negotiate after authentication/initial GATT setup, from the app task.
++        link_tune_stage.store(1, std::memory_order_release);
++    }
++
++    /* Report what the central ACTUALLY granted - the request above is only a
++     * request, and a silent downgrade would otherwise look like the fix
++     * working when it had been refused. */
++    void onConnParamsUpdate(NimBLEConnInfo &info) override {
++        link_params_seen.store(true, std::memory_order_release);
++        Serial.printf("ble: conn params interval=%u latency=%u timeout=%u\n",
++                      (unsigned)info.getConnInterval(),
++                      (unsigned)info.getConnLatency(),
++                      (unsigned)info.getConnTimeout());
++    }
++    void onPhyUpdate(NimBLEConnInfo &, uint8_t tx, uint8_t rx) override {
++        Serial.printf("ble: negotiated PHY tx=%u rx=%u\n", (unsigned)tx, (unsigned)rx);
+     }
+     void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int reason) override {
++        link_tune_stage.store(0, std::memory_order_release);
+         /* THE SESSION ENDS ON THE FIRST LINE, as `have_conn = false` did: the
+          * app task must not go on believing a peer is connected while this
+          * callback is still running (it can spend a Serial.printf in here).
+@@ -506,7 +550,7 @@ class SrvCb : public NimBLEServerCallbacks {
+ } srv_cb;
+ 
+ class CtrlCb : public NimBLECharacteristicCallbacks {
+-    void onWrite(NimBLECharacteristic *c, NimBLEConnInfo &) override {
++    void onWrite(NimBLECharacteristic *c, NimBLEConnInfo &info) override {
+         std::string v = c->getValue();
+         while (!v.empty() && (v.back() == '\n' || v.back() == '\r')) v.pop_back();
+         if (v.empty()) return;
+@@ -583,6 +627,42 @@ class CtrlCb : public NimBLECharacteristicCallbacks {
+          * The clamps are the same clamps, applied in the same place. */
+         last_act_ms = millis();
+ 
++#if PROTO_BLE_BENCH
++        // Bench controls: negotiate one parameter at a time before timing OTA.
++        if (v == "link") {
++            uint8_t tx = 0, rx = 0;
++            char line[100];
++            const bool known = srv->getPhy(conn_handle, &tx, &rx);
++            snprintf(line, sizeof(line), "BENCH LINK interval=%u mtu=%u phy_known=%u tx=%u rx=%u",
++                     (unsigned)info.getConnInterval(), (unsigned)info.getMTU(),
++                     (unsigned)known, (unsigned)tx, (unsigned)rx);
++            tx_append_line(line);
++            return;
++        }
++        if (v.compare(0, 9, "interval ") == 0) {
++            char *end = nullptr;
++            const unsigned long n = strtoul(v.c_str() + 9, &end, 10);
++            if (!end || *end || n < 12 || n > 104 || otaBleActive()) {
++                tx_append_line("OTAB FAIL interval needs 12..104 while idle");
++            } else {
++                srv->updateConnParams(conn_handle, n, n, 0, 72);
++                tx_append_line("BENCH interval requested; inspect link after settling");
++            }
++            return;
++        }
++        if (v == "phy1" || v == "phy2") {
++            const uint8_t mask = v == "phy2" ? BLE_GAP_LE_PHY_2M_MASK : BLE_GAP_LE_PHY_1M_MASK;
++            const bool ok = !otaBleActive() && srv->updatePhy(conn_handle, mask, mask, 0);
++            tx_append_line(ok ? "BENCH PHY requested; inspect link after settling" : "OTAB FAIL PHY request");
++            return;
++        }
++        if (v == "dle") {
++            if (otaBleActive()) tx_append_line("OTAB FAIL dle while active");
++            else { srv->setDataLen(conn_handle, 251); tx_append_line("BENCH DLE requested"); }
++            return;
++        }
++#endif
++
+         /* `caps` - src/caps.h. Read-only, but after the auth gate like every
+          * node verb: an unauthenticated peer squatting the window is not owed
+          * a description of the image. */
+@@ -636,6 +716,22 @@ class CtrlCb : public NimBLECharacteristicCallbacks {
+             return;
+         }
+ 
++        if (v == "reset" || v == "reboot") {
++            /* Reachable only after `auth` - this sits below the auth gate, so
++             * it answers OTAB FAIL auth required like every other verb. A
++             * reboot primitive that did not would be a denial-of-service any
++             * passer-by could fire at a node holding a BLE window open.
++             *
++             * The reply goes out BEFORE the latch is set, and ble_ota_tick()
++             * drains the TX queue and waits before it calls esp_restart():
++             * a client that gets no acknowledgement cannot tell a reset that
++             * happened from a command that was never received. */
++            tx_append_line("OTAB RESET rebooting");
++            reset_pending.store(true, std::memory_order_release);
++            Serial.println("ble: reset requested over BLE");
++            return;
++        }
++
+         if (v.compare(0, 6, "telem ") == 0) {
+             /* FAST TELEMETRY OVER BLE. Same latch shape as `cadence` above,
+              * and the same refusal rather than overwrite: the operator's first
+@@ -725,11 +821,17 @@ class CtrlCb : public NimBLECharacteristicCallbacks {
+             return;
+         }
+ 
++        if (otaBleActive() && serial_driving.load(std::memory_order_acquire)) {
++            tx_append_line("OTAB FAIL serial transfer owns receiver");
++            return;
++        }
+         if (otaBleSubmitCommand(v.c_str()) == OtaBleSubmit::Rejected) {
+             /* Announced on the status channel too: the receiver reports
+              * synchronous rejections through its return value, not through the
+              * status hook, so without this the host sees silence. */
+             tx_append_line("OTAB FAIL command rejected");
++        } else {
++            serial_driving.store(false, std::memory_order_release);
+         }
+     }
+ } ctrl_cb;
+@@ -1553,9 +1655,141 @@ void ble_ota_report_claim(uint16_t minutes, bool ok)
+ bool ble_ota_busy(void)       { return up && otaBleActive(); }
+ bool ble_ota_flash_busy(void) { return flash_busy; }
+ 
++/* ---- SERIAL OTA: the same receiver, a different transport --------------
++ *
++ * esp-ota-ble "knows nothing about BLE" (ota_ble.h): otaBleSubmitCommand() is
++ * safe from any task and otaBleStageBytes() only asks not to be the consumer.
++ * The BLE-only part was never the receiver, it was the transport - a CTRL
++ * characteristic for control lines and a DATA characteristic for firmware
++ * bytes. Over USB that is one port: newline-terminated commands, then raw
++ * bytes. The status hook already mirrors every OTAB line to Serial
++ * (ota_status_hook), so the host's line parser works unchanged.
++ *
++ * WHY THESE WRAP RATHER THAN main.cpp CALLING THROUGH: main.cpp includes
++ * bleota.h, not <ota_ble.h>. This file already owns the hooks, the session and
++ * the only otaBleTick() call, so the receiver stays behind one door.
++ *
++ * SELF-PACING IS MANDATORY, and it is why stage() ticks. otaBleStageBytes()
++ * does NOT block and does NOT drop when the ring is full - it latches
++ * `failed`, and the consumer reports OTAB FAIL credit-overrun and aborts. On
++ * BLE the credit window paces the host; a serial host has no such brake, so
++ * the drain has to happen between writes. Producer and consumer being the same
++ * task is fine here precisely because it serialises them: while the tick
++ * blocks on flash nothing is read, the CDC FIFO backs up, and the host's
++ * write() blocks. That is the flow control.
++ *
++ * ble_ota_tick()'s `if (!up)` guard is BLE-window state, so these must call
++ * otaBleTick() directly - going through ble_ota_tick() with the radio down
++ * would stage bytes that are never drained, straight into credit-overrun. */
++/* SERIAL IS A CLIENT THE `no client` GUARD BELOW CANNOT SEE, and that is what
++ * killed the first serial delta push. MEASURED 2026-09-10: `begin` was
++ * accepted, `OTAB READY part=app0 size=30804 xform=delta out=718592` and
++ * `OTAB CRED 30804` both came back - and then the very next ble_ota_tick()
++ * printed "transfer open with no client - aborting" and tore the session down,
++ * because have_conn() is blesess_conn(&sess), a BLE-session predicate that a
++ * USB host can never satisfy.
++ *
++ * A FLAG ALONE WOULD BE A REGRESSION, so this is a flag AND a deadline. The
++ * guard's comment is protecting a real hazard: esp_ota_begin() has already
++ * fired the quiesce hook, so a transfer whose driver vanished leaves the poller
++ * parked indefinitely. A serial driver dies exactly the same way - kill the
++ * host process mid-push and nothing on the wire ever says so. Exempting serial
++ * unconditionally would hand that hazard back for the one transport with no
++ * link-layer disconnect to detect. So the exemption expires: `serial_seen_ms`
++ * is refreshed by every accepted command and every staged block, and once it
++ * goes stale the guard fires as it always did.
++ *
++ * BLE_OTA_STALL_MS, and the same signed comparison as the stall watchdog at the
++ * bottom of ble_ota_tick(), deliberately - one idle-driver policy, not two.
++ *
++ * THE FLAG IS NOT REDUNDANT WITH THE TIMESTAMP. A zero-initialised
++ * `serial_seen_ms` cannot mean "never": millis() is small right after boot, so
++ * `now - 0 < BLE_OTA_STALL_MS` reads as LIVE for the first 30 seconds of
++ * uptime, which would suppress the guard for every BLE transfer that started in
++ * that window. The flag is what distinguishes "no serial driver has ever
++ * spoken" from "one spoke at millisecond 12". */
++static std::atomic<uint32_t> serial_seen_ms{0};
++
++static void serial_driver_mark(void)
++{
++    serial_seen_ms.store(millis(), std::memory_order_release);
++    serial_driving.store(true, std::memory_order_release);
++}
++
++static bool serial_driver_live(uint32_t now)
++{
++    if (!serial_driving.load(std::memory_order_acquire)) return false;
++    const uint32_t seen = serial_seen_ms.load(std::memory_order_acquire);
++    return (int32_t)(now - seen - BLE_OTA_STALL_MS) < 0;
++}
++
++bool ble_ota_serial_submit(const char *line)
++{
++    if (otaBleActive() && !serial_driving.load(std::memory_order_acquire)) return false;
++    const bool ok = otaBleSubmitCommand(line) == OtaBleSubmit::Accepted;
++    /* ON ACCEPTANCE ONLY. A rejected line is not evidence of a live driver, and
++     * counting it would let a host that only ever sends garbage hold the
++     * exemption open. */
++    if (ok) serial_driver_mark();
++    return ok;
++}
++
++void ble_ota_serial_stage(const uint8_t *d, size_t n)
++{
++    serial_driver_mark();
++    otaBleStageBytes(d, n);
++    otaBleTick(millis());
++}
++
++void ble_ota_serial_pump(void) { otaBleTick(millis()); }
++
++bool ble_ota_serial_active(void) { return otaBleActive(); }
++
++static void ble_tune_link(void)
++{
++    if (!have_conn() || !authed() || otaBleActive()) return;
++    const uint32_t now = millis();
++    const unsigned stage = link_tune_stage.load(std::memory_order_acquire);
++    if (stage == 1 && (uint32_t)(now - conn_at) >= 600u) {
++        // Equal endpoints matter: macOS accepted 15/15 ms, but chose 30 ms
++        // from 15..30 ms. Keep 720 ms supervision so reboot detection does
++        // not add the 5 s delay measured with the previous request.
++        link_params_seen.store(false, std::memory_order_release);
++        link_tune_at = now;
++        link_tune_stage.store(2, std::memory_order_release);
++        srv->updateConnParams(conn_handle, 12, 12, 0, 72);
++    } else if (stage == 2 &&
++               (link_params_seen.load(std::memory_order_acquire) ||
++                (uint32_t)(now - link_tune_at) >= 1000u)) {
++        // One request after interval negotiation; unsupported peers retain
++        // their PHY. Never initiate a control procedure during flash OTA.
++        link_tune_stage.store(3, std::memory_order_release);
++        if (!srv->updatePhy(conn_handle, BLE_GAP_LE_PHY_2M_MASK,
++                            BLE_GAP_LE_PHY_2M_MASK, 0))
++            Serial.println("ble: 2M request refused; retaining negotiated PHY");
++    }
++}
++
+ void ble_ota_tick(void)
+ {
+     if (!up) return;
++    ble_tune_link();
++
++    /* RESCUE RESET, drained here because this is the app task. Ordered so the
++     * acknowledgement actually leaves: drain the TX queue, give the link a
++     * moment to put it on air, and only then reboot. Any transfer in flight is
++     * abandoned deliberately - the passive slot is half-written, which is
++     * harmless, and the operator asking for a reset wants the board back more
++     * than they want the push. */
++    if (reset_pending.load(std::memory_order_acquire)) {
++        reset_pending.store(false, std::memory_order_release);
++        drain_tx();
++        delay(300);
++        Serial.println("ble: rebooting on request");
++        Serial.flush();
++        node_prepare_restart();
++        esp_restart();
++    }
+ 
+     otaBleTick(millis());
+     /* BEFORE drain_tx(), so a refusal this exchange produced goes out on the
+@@ -1576,10 +1810,18 @@ void ble_ota_tick(void)
+      * hook, so the node would sit with its poller parked indefinitely. Testing
+      * the peer rather than the request removes the race entirely, because
+      * `have_conn` cannot be true for a peer that is gone. */
+-    if (otaBleActive() && !have_conn()) {
++    /* ...OR NO SERIAL DRIVER. See serial_driver_live() above: a USB host is a
++     * client this predicate cannot see, and its exemption expires rather than
++     * being unconditional, so a serial driver that dies mid-push still lands
++     * here once BLE_OTA_STALL_MS has passed with nothing staged. */
++    if (otaBleActive() && !have_conn() && !serial_driver_live(millis())) {
+         Serial.println("!! ble: transfer open with no client - aborting");
+         otaBleAbort();
+         stall_armed = false;
++        /* CLEAR THE FLAG WITH THE TRANSFER. Left set, a stale timestamp from a
++         * dead serial push would be re-evaluated against every future
++         * transfer's clock instead of being forgotten with the session. */
++        serial_driving.store(false, std::memory_order_release);
+         return;
+     }
+ 
+diff --git a/src/bleota.h b/src/bleota.h
+index 8bc8334..270a37a 100644
+--- a/src/bleota.h
++++ b/src/bleota.h
+@@ -202,6 +202,42 @@ bool ble_ota_flash_busy(void);
+  * and hard-ceiling deadlines. */
+ void ble_ota_tick(void);
+ 
++/* ---- The same receiver over USB serial --------------------------------
++ *
++ * esp-ota-ble is transport-agnostic by contract (ota_ble.h: "This module knows
++ * nothing about BLE"), and ota_status_hook already mirrors every OTAB line to
++ * Serial, so a serial host's line parser works with no firmware change. What
++ * was missing is a way in: the OTA verbs were dispatched only from the BLE
++ * control characteristic. These four are that way in, and they exist here
++ * rather than in main.cpp because main.cpp includes this header, not
++ * <ota_ble.h>.
++ *
++ * NOT gated on the BLE window. ble_ota_tick() early-returns on `!up`, so the
++ * serial path must not go through it - with the radio down that would stage
++ * bytes nothing ever drains, straight into OTAB FAIL credit-overrun. */
++
++/* Submit one control line ("begin <size> <sha256hex>", "end", "abort",
++ * "info") to the receiver. Safe from any task; the command is LATCHED, so
++ * call ble_ota_serial_pump() to execute it. True when it was accepted. */
++bool ble_ota_serial_submit(const char *line);
++
++/* Stage firmware bytes AND drain them. The drain is not optional: unlike the
++ * BLE path there is no credit window pacing a serial host, and
++ * otaBleStageBytes() neither blocks nor drops when the ring is full - it
++ * latches a failure that surfaces as OTAB FAIL credit-overrun. Staging and
++ * draining on one task serialises them, which is exactly the flow control:
++ * while this blocks on flash the CDC FIFO backs up and the host's write()
++ * blocks. */
++void ble_ota_serial_stage(const uint8_t *d, size_t n);
++
++/* Run the consumer once, to execute a latched command (a `begin` erases here,
++ * which takes seconds) or to keep a stalled transfer's deadlines moving. */
++void ble_ota_serial_pump(void);
++
++/* True between a successful `begin` and its end/abort, asked of the receiver
++ * itself rather than of the BLE session. */
++bool ble_ota_serial_active(void);
++
+ /* One Modbus exchange on the RS-485 bus: write `req`, return the reply in
+  * `rsp`, or 0 for silence. Supplied by the application because this module
+  * owns no wire - main.cpp has Serial1, the drain-then-ask discipline and the
+@@ -340,4 +376,13 @@ static inline bool ble_telem_active(void) { return false; }
+ static inline bool ble_take_telem_request(uint16_t *, uint16_t *) { return false; }
+ static inline void ble_report_telem(uint16_t, uint16_t, bool) {}
+ 
++/* Serial OTA compiles out with the receiver, not with the radio - but the
++ * receiver is what PROTO_BLE_OTA gates, and without it there is nothing to
++ * submit bytes to. A build with no receiver refuses the verbs rather than
++ * silently accepting a transfer it cannot land. */
++static inline bool ble_ota_serial_submit(const char *) { return false; }
++static inline void ble_ota_serial_stage(const uint8_t *, size_t) {}
++static inline void ble_ota_serial_pump(void) {}
++static inline bool ble_ota_serial_active(void) { return false; }
++
+ #endif
+diff --git a/src/caps.h b/src/caps.h
+index 8fa08e5..22e30f1 100644
+--- a/src/caps.h
++++ b/src/caps.h
+@@ -72,14 +72,29 @@ static const CapsVerb CAPS_SERIAL_VERBS[] = {
+     {"ble",        "",                          "BLE window up and the node held awake ble_hold_ms"},
+     {"bleup",      "",                          "same as ble"},
+ #endif
++#if !PROTO_BUS && PROTO_BLE_OTA
++    {"info",  "", "OTA receiver: report the running image"},
++    {"begin", "<size> <sha256> [<xform> <image_size>]", "OTA receiver: start binary serial transfer"},
++    {"end",   "", "OTA receiver: finish a transfer"},
++    {"abort", "", "OTA receiver: abandon a transfer outside binary data phase"},
++#endif
+ };
+ 
+ #if PROTO_BLE_OTA
+ /* The BLE CTRL characteristic: CtrlCb::onWrite() in bleota.cpp, then the
+  * esp-ota-ble receiver's own verbs for everything it does not handle. */
+ static const CapsVerb CAPS_BLE_VERBS[] = {
++#if PROTO_BLE_BENCH
++    {"link", "", "bench: negotiated connection and PHY"},
++    {"interval", "<12..104>", "bench: request interval in 1.25 ms units"},
++    {"phy1", "", "bench: request 1M PHY"},
++    {"phy2", "", "bench: request 2M PHY"},
++    {"dle", "", "bench: request 251-octet data length"},
++#endif
+     {"auth",    "<nonce hex>",     "authenticate; required by everything below except abort"},
+     {"caps",    "",                "this list"},
++    {"reset",   "",                "reboot the node"},
++    {"reboot",  "",                "same as reset"},
+     {"cadence", "<s> [lease_min]", "poll/uplink cadence lease"},
+     {"telem",   "<s> [lease_min]", "BLE telemetry cadence lease; 0 disarms"},
+     {"blehold", "<minutes>",       "extend the BLE window"},
+@@ -88,6 +103,7 @@ static const CapsVerb CAPS_BLE_VERBS[] = {
+     {"release", "",                "same as unclaim"},
+     {"info",    "",                "OTA receiver: report the running image"},
+     {"begin",   "<size> <sha256> [<xform> <image_size>]", "OTA receiver: start a transfer"},
++    {"resume",  "<off> <size> <sha256>", "OTA receiver: resume a raw transfer"},
+     {"end",     "",                "OTA receiver: finish a transfer"},
+     {"abort",   "",                "OTA receiver: abandon a transfer"},
+ };
+diff --git a/src/config.h b/src/config.h
+index 0530458..edb0ecc 100644
+--- a/src/config.h
++++ b/src/config.h
+@@ -667,6 +667,14 @@
+ /* Fixed auth nonce for the PROTO_BLE_BENCH build only. See the banner in
+  * setup(): with no uplink there is nothing to carry a fresh nonce, so this is a
+  * published constant and the BLE channel is effectively unauthenticated. */
++/* CONFIRM AN OTA'd IMAGE WITHOUT PROVING ANYTHING. Bench builds only - see the
++ * branch it enables in main.cpp, which explains what it gives up. A node build
++ * must leave this at 0: the whole point of the default is that an image which
++ * cannot demonstrate a working bus and radio gets rolled back. */
++#ifndef PROTO_BENCH_CONFIRM_OTA
++#define PROTO_BENCH_CONFIRM_OTA  0
++#endif
++
+ #ifndef PROTO_BLE_BENCH_NONCE
+ #define PROTO_BLE_BENCH_NONCE  0xBEEF
+ #endif
+diff --git a/src/console.h b/src/console.h
+index 9b75ddf..92aae2f 100644
+--- a/src/console.h
++++ b/src/console.h
+@@ -86,7 +86,13 @@
+  * with the operator's actual (rejected) line nowhere in sight. So overflow
+  * latches `drop` and nothing is returned until the CR or LF that ends the
+  * physical line. */
+-#define CONSOLE_LINE_MAX 32
++/* 128, NOT 32, AND THE OTA `begin` LINE IS WHY. "begin <size> <sha256hex>" is
++ * 6 + up to 8 + 1 + 64 = ~79 characters, so at 32 it was not truncated - it
++ * was DROPPED by the rule above, and the serial OTA command could never
++ * arrive at all, with no error to say why. 128 keeps `len` a uint8_t (the
++ * overflow test is `len < CONSOLE_LINE_MAX - 1`, so the type still covers it)
++ * and costs ~96 bytes per accumulator, of which there are two statics. */
++#define CONSOLE_LINE_MAX 128
+ 
+ typedef struct {
+     char    buf[CONSOLE_LINE_MAX];
+diff --git a/src/main.cpp b/src/main.cpp
+index 26297bd..aac0118 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1898,11 +1898,88 @@ static void serbus_tick(void)
+      * relay and no hush here, so every line goes straight to the accumulator. */
+     {
+         static ConsoleLine cmdline = {};
++#if PROTO_BLE_OTA
++        /* SERIAL OTA, DATA PHASE. Same receiver as the BLE path, different
++         * transport: control lines arrive as text below, then `size` raw bytes
++         * arrive here with no framing at all - exactly as the BLE DATA
++         * characteristic delivers them, and for the same reason (framing the
++         * payload would cost more than the transport saves).
++         *
++         * THE BYTE COUNT IS THE FRAME. There is no escape sequence and none is
++         * wanted: an escape would have to be paid on every byte of a 700 kB
++         * image to solve a problem the length already solves. `begin` said how
++         * many bytes follow, so exactly that many are consumed here and the
++         * accumulator never sees them - which is what keeps a firmware byte
++         * that happens to be 0x0A from completing a command line.
++         *
++         * STAGE IN BLOCKS, AND LET stage() DRAIN. ble_ota_serial_stage() ticks
++         * the consumer on every call because otaBleStageBytes() neither blocks
++         * nor drops on a full ring - it latches a failure that surfaces as
++         * OTAB FAIL credit-overrun. Blocking on flash here is the flow control:
++         * nothing is read while it blocks, the CDC FIFO backs up, and the
++         * host's write() blocks with it.
++         *
++         * NO EARLY RETURN. Falling through costs one empty available() test
++         * and keeps console_quiet_reconcile() on its schedule; it also hands
++         * any bytes past the last image byte straight to the accumulator,
++         * which is where the following `end` belongs. */
++        static uint32_t ota_rx_left = 0;
++        /* A rejected begin or an expired transfer must release binary mode.
++         * Discard queued payload after an abort; it is never console text. */
++        if (ota_rx_left && !ble_ota_serial_active()) {
++            while (nodecon.available() > 0) nodecon.read();
++            ota_rx_left = 0;
++            cmdline = {};
++        }
++        if (ota_rx_left) {
++            uint8_t buf[512];
++            size_t  k = 0;
++            while (ota_rx_left && nodecon.available() > 0) {
++                int c = nodecon.read();
++                if (c < 0) break;
++                buf[k++] = (uint8_t)c;
++                ota_rx_left--;
++                if (k == sizeof(buf)) { ble_ota_serial_stage(buf, k); k = 0; }
++            }
++            if (k) ble_ota_serial_stage(buf, k);
++            if (!ota_rx_left)
++                Serial.println("ota-serial: image received, waiting for `end`");
++            else {
++                console_quiet_reconcile();
++                return;  /* newly arrived bytes still belong to the payload */
++            }
++        }
++#endif
+         while (nodecon.available() > 0) {
+             int c = nodecon.read();
+             if (c < 0) break;
+             const char *ln = console_line_push(&cmdline, c);
+             if (ln && *ln) {
++#if PROTO_BLE_OTA
++                /* THE RECEIVER'S OWN VERBS, over USB. caps.h lists these as
++                 * CMD_BLE and says the begin/data sequence "must stay on the
++                 * NimBLE task" - that overstates ota_ble.h, which says
++                 * otaBleSubmitCommand() is "Safe from any task" and that the
++                 * load-bearing split is producer/consumer, not BLE/not-BLE.
++                 * The split exists so flash writes cannot stall the radio
++                 * task; there is no radio task on this path.
++                 *
++                 * PUMP IMMEDIATELY: submit only LATCHES. A `begin` erases the
++                 * passive slot inside that pump and takes seconds, so the
++                 * host must not start streaming until this returns. */
++                if (!strncmp(ln, "begin ", 6) || !strcmp(ln, "end") ||
++                    !strcmp(ln, "abort")      || !strcmp(ln, "info")) {
++                    const bool ok = ble_ota_serial_submit(ln);
++                    ble_ota_serial_pump();
++                    if (ok && !strncmp(ln, "begin ", 6) && ble_ota_serial_active()) {
++                        ota_rx_left = (uint32_t)strtoul(ln + 6, nullptr, 10);
++                        /* Leave the text loop before even one payload byte
++                         * can be mistaken for a command in this same tick. */
++                        break;
++                    }
++                    continue;
++                }
++#endif
+                 const ConsoleVerbCmd vc = console_verb_parse(ln);
+                 if (vc.kind != CONSOLE_VERB_NONE) console_verb_run(vc);
+             }
+@@ -2235,6 +2312,26 @@ void setup() {
+     }
+     Serial.printf("running from %s%s\n", su_running_partition(),
+                   pending_verify ? " (PENDING VERIFY - must prove itself)" : "");
++#if PROTO_BENCH_CONFIRM_OTA
++    /* CONFIRM HERE, not at the end of setup(). The other bench-confirm branch
++     * below sits after the radio bring-up and the join, which on a bench board
++     * with no SX1262 is never reached - so an OTA'd bench image stayed
++     * PENDING_VERIFY and the NEXT push was refused with
++     * ESP_ERR_OTA_ROLLBACK_INVALID_STATE. Measured 2026-09-10: two consecutive
++     * BLE pushes, the second one dead on arrival, recoverable only with a USB
++     * flash. Confirming before anything that can block is the whole point. */
++    if (pending_verify) {
++        if (su_confirm()) {
++            pending_verify = false;
++            Serial.println("confirmed early (PROTO_BENCH_CONFIRM_OTA) - bench "
++                           "build, nothing here can prove a bus or a radio");
++        } else {
++            Serial.println("early bench confirm did NOT take - image stays "
++                           "provisional and will roll back at the next reset");
++        }
++    }
++#endif
++
+     /* Generous: a join can legitimately take many minutes on a bad day, and
+      * rolling back a good image because coverage was poor for ten minutes
+      * would be its own outage.
+@@ -2297,8 +2394,81 @@ void setup() {
+                    "constant - there is NO authentication worth the name. "
+                    "Bench only, never on a deployed node.");
+     ble_ota_up(PROTO_BLE_BENCH_NONCE, BLE_OTA_MAX_UP_MS);
++    /* Historical core-0 experiment. The handoff's nine-run comparison found
++     * no speedup (26.97 vs 28.08 kB/s). The causal claims below were refuted;
++     * this pinning remains bench-only pending a controlled replacement.
++     * ON CORE 0, WITH THE RADIO, BECAUSE THE ARDUINO TASK IS ON CORE 1.
++     *
++     * MEASURED 2026-09-10: the node pushes at 25.8 kB/s (25.64/25.68/26.06,
++     * three real-write runs) where fugu does 41.9 kB/s (41.3-43.7, n=5) on the
++     * same board, the same receiver, the same 256 KB ring and the same 30 ms
++     * interval. Subtracting flash from both says where it goes: of ~28 s the
++     * node spends 13.5 s in write_ms (9.5 s of it erase), leaving 14.5 s that
++     * is neither erase nor write; fugu carries 2.5x more payload in the SAME
++     * 13.8 s of non-flash time. Per byte the node's link runs at 49.5 kB/s
++     * against fugu's 129.6. The ceiling is not flash - if the link fed at
++     * fugu's rate this image would floor at write_ms, i.e. ~53 kB/s.
++     *
++     * THE STRUCTURAL DIFFERENCE IS THE CORE, and it is not overridable by
++     * config. CONFIG_ARDUINO_RUNNING_CORE is 1 here and 0 on fugu, but ours
++     * comes from the PREBUILT framework
++     * (~/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/
++     * sdkconfig:613), not from platformio.ini, so it cannot be changed without
++     * rebuilding the framework. Both firmwares put NimBLE and the BT
++     * controller on core 0 (BT_NIMBLE_PINNED_TO_CORE=0,
++     * BT_CTRL_PINNED_TO_CORE=0). So on fugu the controller, the host and the
++     * OTA consumer are all core 0 and a staged byte never crosses a core
++     * boundary between arrival and flash; here it crossed one every chunk.
++     * ota_ble.h prescribes exactly this remedy: "either give this its own
++     * task".
++     *
++     * ONE TASK, NOT A SECOND TICKER. The whole loop body moves, rather than
++     * ble_ota_tick() alone, because otaBleTick() must have a single consumer
++     * and serbus_tick() reaches it too through ble_ota_serial_stage(). Two
++     * tasks calling it would be two consumers of one ring.
++     *
++     * Priority 1 and a captureless lambda (which converts to TaskFunction_t),
++     * so this matches what the Arduino loop task gave it - only the core
++     * changes. 16 KB because telemetry_emit() builds its payload on this
++     * stack and the Arduino loop task it used to run on has 8 KB by default;
++     * this is the one place a stack overflow would look like a throughput
++     * result. The Arduino task then parks forever below: setup() must never
++     * return in this build, exactly as the endless loop it replaces never
++     * did, or loop() would start driving LoRaWAN on a board with no radio. */
++    xTaskCreatePinnedToCore([](void *) {
+     for (;;) {
+         ble_ota_tick();
++
++        /* During a transfer, service the receiver AND its USB producer.
++         * The original fast path below skipped serbus_tick(), which starved
++         * serial OTA immediately after READY. Its throughput explanation is
++         * historical: the handoff found lower variance, no mean speedup.
++         *
++         * ota_ble.h says it plainly: "HOW OFTEN YOU CALL THIS IS THE
++         * TRANSFER'S THROUGHPUT. This is not a housekeeping tick... any delay
++         * between ticks is dead air on the link... either give this its own
++         * task or make sure everything else sharing the task is non-blocking."
++         *
++         * MEASURED 2026-09-10, and this is the last unexplained gap: the node
++         * pushes at ~28 kB/s where fugu does 40.7 kB/s on the same board, the
++         * same receiver, the same 256 KB ring and the same 30 ms connection
++         * interval (macOS grants 24 to both; asking for 12..24 changed
++         * nothing). Chunk size makes no difference (28.7 at 244 B vs 27.9 at
++         * 512 B) and the host's write pacing cannot be removed - without it
++         * the transfer stalls outright. What is left is this loop: fugu pumps
++         * its consumer every network-loop pass behind a 1 ms yield, while this
++         * one paid telemetry_control() + telemetry_emit() + serbus_tick() +
++         * delay(2) between every pair of ticks.
++         *
++         * Nothing here is dropped, only deferred: a transfer is bounded, and
++         * telemetry/console work resumes the moment it ends. delay(1) rather
++         * than a bare yield keeps the idle task fed - starving it trips the
++         * task watchdog, which would turn a throughput fix into a reboot. */
++        if (ble_ota_busy()) {
++            serbus_tick();  /* serial OTA must keep feeding the receiver */
++            delay(1);
++            continue;
++        }
+         /* THE BENCH LOOP HAS TO DRIVE TELEMETRY ITSELF, because it never
+          * returns to loop(). Review 2026-09-09: without these two calls
+          * esp32s3_blebench COMPILED the fast path and could not run a byte of
+@@ -2318,6 +2488,9 @@ void setup() {
+         }
+         delay(2);
+     }
++    }, "blebench", 16384, nullptr, 1, nullptr, 0);
++    /* The Arduino task's only remaining job is to not return. */
++    for (;;) delay(1000);
+ #endif
+ 
+     Serial.println("step 3: radio.begin");
+@@ -2931,6 +3104,30 @@ void setup() {
+             Serial.println("joined but the bus is silent - rolling back");
+             su_reject_and_reboot();          /* does not return */
+         }
++#elif PROTO_BENCH_CONFIRM_OTA
++        /* BENCH ONLY, and it costs exactly the safety the branch below keeps.
++         *
++         * A PROTO_BUS_OFF board has no bus and no radio to prove itself with,
++         * so the branch below never confirms - which is right for a node and
++         * wrong for the BLE bench board, where it makes every OTA provisional:
++         * the image rolls back at the next reset, and a SECOND push onto the
++         * unconfirmed first one is refused outright with
++         * ESP_ERR_OTA_ROLLBACK_INVALID_STATE. Measured 2026-09-10: that is what
++         * ended a throughput run, and the only exit is a physical reset because
++         * nothing in this firmware reboots on command.
++         *
++         * So this build confirms unconditionally. It is safe here for one
++         * reason only: the board is on a cable with somebody watching, and a
++         * bad image is recovered with esptool, not with the bootloader. Never
++         * set this on an env a node could be flashed from. */
++        if (su_confirm()) {
++            pending_verify = false;
++            Serial.println("confirmed unconditionally (PROTO_BENCH_CONFIRM_OTA "
++                           "- bench build, no bus to prove anything with)");
++        } else {
++            Serial.println("bench confirm did NOT take - image still "
++                           "provisional, it will roll back on the next reset");
++        }
+ #else
+         /* This build cannot run the check that decides the question, so it
+          * must not answer it either way. Declining to confirm means the
+@@ -3237,7 +3434,9 @@ static void park_for_sleep(void)
+  * incoming image a puzzle. */
+ void node_prepare_restart(void)
+ {
++#if !PROTO_BLE_BENCH
+     radio.sleep(false);
++#endif
+     pinMode(PIN_LORA_RXEN, OUTPUT); digitalWrite(PIN_LORA_RXEN, LOW);
+     pinMode(PIN_LORA_TXEN, OUTPUT); digitalWrite(PIN_LORA_TXEN, LOW);
+     Serial.flush();
+@@ -4035,6 +4234,44 @@ void loop() {
+ 
+     bool have_reply = rq_count > 0;
+     bool poll_due   = (millis() - last_poll) >= poll_interval_ms();
++
++    /* A BLE OTA IN FLIGHT OWNS THIS LOOP, AND THE BUS POLL MUST STAND ASIDE.
++     *
++     * MEASURED 2026-09-10, one complete push of 751 744 B from macOS: 108.58 s
++     * end to end = 6.76 kB/s, while the middle half of the SAME transfer moved
++     * 375 808 B in 14.34 s = 25.59 kB/s. Device accounting for that push:
++     * write_ms=7587, erase_ms=5531 - 13.1 s of flash work in a 108 s transfer.
++     * So ~75 % of the wall clock was neither link nor flash.
++     *
++     * WHERE IT WENT. otaBleTick() is the CONSUMER: it drains the 8 KB staging
++     * ring to flash, and grantCredit() advances the host's window to
++     * `written + RING_CAP` as it drains. It runs from this loop. So does the
++     * bus poll - and read_frame() blocks for up to REPLY_WAIT_MS (1500 ms),
++     * with bus_quarantine_until costing a second REPLY_WAIT_MS after a silent
++     * exchange. A poll landing during a push freezes the consumer for seconds;
++     * the ring stops draining, credit stops advancing, and the host sits in
++     * its credit wait. That is why the rate is fine in the middle of a
++     * transfer and poor across the whole of one.
++     *
++     * WHY ble_ota_busy() AND NOT ble_ota_is_up(). is_up() is true for the
++     * whole 15-minute BLE window, which a cabled node OPENS AT BOOT - gating
++     * on it would stop telemetry for fifteen minutes at a time, a far worse
++     * bug than the one being fixed. ble_ota_busy() is `up && otaBleActive()`,
++     * true only between a successful begin and its matching end/abort.
++     *
++     * DELIBERATELY NOT STAMPING last_poll: the poll is postponed, not
++     * consumed, so the measurement happens as soon as the push finishes
++     * instead of a further full interval later. otaBleTick()'s own 30 s
++     * no-bytes abort bounds how long this can hold the bus. */
++    if (ble_ota_busy()) {
++        static uint32_t ota_hold_said_at = 0;
++        if (poll_due && millis() - ota_hold_said_at > 5000u) {
++            ota_hold_said_at = millis();
++            Serial.println("poll held: a BLE OTA is in flight - the bus stands "
++                           "aside so the flash consumer keeps draining");
++        }
++        poll_due = false;
++    }
+     /* AND THE BAND HAS TO BE READY, ASKED ON THE GATE'S OWN CLOCK.
+      *
+      * The cadence floor alone does NOT prevent the deletion it was added for,
+diff --git a/test/caps_table_test.py b/test/caps_table_test.py
+index f2d0057..c608f8e 100644
+--- a/test/caps_table_test.py
++++ b/test/caps_table_test.py
+@@ -30,6 +30,7 @@ are reported UNVERIFIED, loudly, and the exit code stays 0 only for that one
+ omission; every node-side check still runs.
+ """
+ import glob
++import json
+ import os
+ import re
+ import sys
+@@ -85,6 +86,7 @@ def serial_words(console_h, main_cpp):
+     if tick is None:
+         return None, None
+     words |= set(re.findall(r'strcmp\(\s*ln\s*,\s*"([a-z0-9]+)"\s*\)', tick))
++    words |= set(re.findall(r'strncmp\(\s*ln\s*,\s*"([a-z0-9]+) "\s*,', tick))
+     return words, args
+ 
+ 
+@@ -166,6 +168,14 @@ console_h = read("src/console.h")
+ main_cpp = read("src/main.cpp")
+ bleota_cpp = read("src/bleota.cpp")
+ libs = glob.glob(os.path.join(ROOT, ".pio/libdeps/*/esp-ota-ble/src/ota_ble.cpp"))
++for link in glob.glob(os.path.join(ROOT, ".pio/libdeps/*/esp-ota-ble.pio-link")):
++    meta = json.load(open(link))
++    uri = meta['spec']['uri']
++    if uri.startswith('symlink://'):
++        source = os.path.join(meta['cwd'], uri[len('symlink://'):], 'src/ota_ble.cpp')
++        if not os.path.isfile(source):
++            raise RuntimeError('receiver symlink target missing: ' + source)
++        libs.append(source)
+ lib_text = open(libs[0]).read() if libs else None
+ 
+ print("\ncaps.h against the real parsers")
+diff --git a/test/console_host_test.cpp b/test/console_host_test.cpp
+index f1fd9ea..7fb258a 100644
+--- a/test/console_host_test.cpp
++++ b/test/console_host_test.cpp
+@@ -109,13 +109,17 @@ int main(void)
+          * 42-character line came back as its tail. A test that cannot fail
+          * against the bug it names is not a test of that bug. */
+         ConsoleLine l; console_line_reset(&l);
+-        const char *r = feed(&l, "bus baud 9600 and then some more words here\n");
++        char overlong[CONSOLE_LINE_MAX + 2];
++        memset(overlong, 'a', CONSOLE_LINE_MAX);
++        overlong[CONSOLE_LINE_MAX] = '\n';
++        overlong[CONSOLE_LINE_MAX + 1] = '\0';
++        const char *r = feed(&l, overlong);
+         ok(r == NULL, "an overlong line yields NO line at all");
+ 
+         /* The tail is what front-truncation would have delivered, and it is
+          * chosen here to be a legal command so the assertion has teeth. */
+         console_line_reset(&l);
+-        char tail[128];
++        char tail[CONSOLE_LINE_MAX + 32];
+         snprintf(tail, sizeof(tail), "%*s bus baud 9600\n", CONSOLE_LINE_MAX, "x");
+         ok(feed(&l, tail) == NULL,
+            "an overlong line whose TAIL is a legal command still yields nothing");
+@@ -129,7 +133,7 @@ int main(void)
+         /* The drop is to END OF LINE, and an illegal byte inside the dropped
+          * span must not end it early - that would hand back a fragment. */
+         ConsoleLine l; console_line_reset(&l);
+-        char over[128];
++        char over[CONSOLE_LINE_MAX + 32];
+         snprintf(over, sizeof(over), "%*s\tbus\n", CONSOLE_LINE_MAX + 4, "y");
+         ok(feed(&l, over) == NULL,
+            "a TAB inside an overlong line does not end the drop early");
+@@ -172,14 +176,14 @@ int main(void)
+         ok(line != NULL && parse(line).kind == CONSOLE_BUS_SET_BAUD,
+            "DEFECT(2): and it parses as SET_BAUD - recognition is not isolation");
+ 
+-        /* (9) 32 accepted payload bytes latch `drop`, and only CR/LF clears
++        /* (9) A buffer's worth of accepted payload bytes latches `drop`, and only CR/LF clears
+          * it - so the operator's next command is consumed whole. */
+         ConsoleLine m; console_line_reset(&m);
+-        for (int i = 0; i < 32; i++) (void)console_line_push(&m, 'a');
++        for (int i = 0; i < CONSOLE_LINE_MAX; i++) (void)console_line_push(&m, 'a');
+         (void)console_line_push(&m, 0x89);   /* CRC bytes: illegal, reset only */
+         (void)console_line_push(&m, 0x50);
+         ok(feed(&m, "bus baud 38400\n") == NULL,
+-           "DEFECT(9): the command after a 32-byte binary run is swallowed");
++           "DEFECT(9): the command after a buffer-sized binary run is swallowed");
+     }
+ 
+     /* ---- not a bus command at all --------------------------------------- */
+diff --git a/tools/ota_ble_push.py b/tools/ota_ble_push.py
+index a629807..618e5d1 100755
+--- a/tools/ota_ble_push.py
++++ b/tools/ota_ble_push.py
+@@ -188,6 +188,7 @@ class NodeLink(object):
+     def __init__(self, target, address=None, chunk=0):
+         self.target = target
+         self.address = address
++        self.requested_chunk = chunk
+         self.link = O.BleOtaLink(CTRL_UUID, CTRL_UUID, DATA_UUID, chunk=chunk)
+         self.device = None
+ 
+@@ -202,6 +203,12 @@ class NodeLink(object):
+                 "- BLE_OTA_MAX_UP_MS is 15 minutes." % (self.target,))
+         print("connecting to %s ..." % (self.device.name or self.device.address))
+         await self.link.open(self.device)
++        if not self.requested_chunk:
++            # Preserve the transport's limit (including BlueZ's measured cap).
++            # 495 value bytes occupy exactly two 251-byte LL payloads; 512
++            # needs a third. Re-evaluate on every connection.
++            self.link._chunk_override = 0
++            self.link._chunk_override = min(self.link.chunk, 495)
+ 
+         # AUTHENTICATE BEFORE ANYTHING ELSE. The node drops firmware writes
+         # silently until this succeeds - there is no reply path on the data
+@@ -225,6 +232,9 @@ class NodeLink(object):
+                                 "BLE receiver the one that expects it?")
+         if not got["ok"]:
+             raise O.OtaBleError("the node refused the nonce: %s" % got["fail"])
++        # The receiver negotiates interval then PHY after authentication.
++        # Keep those control procedures outside the timed flash/data phase.
++        await asyncio.sleep(1.5)
+ 
+     async def release(self):
+         await self.link.release()

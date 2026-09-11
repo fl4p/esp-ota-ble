@@ -1,0 +1,36 @@
+{
+  "raw_capture_sha256": "92df833bc402324658e550f135ae8d95c81df01830ef88633ca54d5fb15ce505",
+  "signals": [
+    {
+      "packet": 9276,
+      "timestamp_us": "1228091061",
+      "event": "881",
+      "direction": "1",
+      "kind": "request",
+      "identifier": 4,
+      "fields": {
+        "psm": 150,
+        "scid": 72,
+        "mtu": 1251,
+        "mps": 1251,
+        "credits": 65535
+      }
+    },
+    {
+      "packet": 9279,
+      "timestamp_us": "1228101255",
+      "event": "882",
+      "direction": "0",
+      "kind": "response",
+      "identifier": 4,
+      "fields": {
+        "dcid": 64,
+        "mtu": 16384,
+        "mps": 247,
+        "credits": 67,
+        "result": 0
+      }
+    }
+  ],
+  "note": "Observed complete connection signals only; capture is not a complete packet-loss census."
+}

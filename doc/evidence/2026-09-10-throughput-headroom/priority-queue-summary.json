@@ -1,0 +1,41 @@
+{
+  "pilots": [
+    [
+      88.41288900239888,
+      244
+    ],
+    [
+      88.1989811389801,
+      495
+    ]
+  ],
+  "repeat_chunk": 244,
+  "repeat_rates": [
+    86.76552165518673,
+    86.79668341727422,
+    87.94306975713124
+  ],
+  "repeat_mean": 87.1684249431974,
+  "final": {
+    "info": {
+      "run": "app1",
+      "slot": 1572864,
+      "base": "9f8abf18b2ad59476c71f4c3ab757b6e9bc3fb8b7f5f5a95cb64263f015ba587",
+      "resume_capable": true,
+      "resume": null,
+      "xforms": [
+        "raw",
+        "tamp",
+        "delta"
+      ]
+    },
+    "setup": [
+      "OTAB AUTH ok",
+      "BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0",
+      "BENCH BUFFERS msys1=50 size=256 msys2=96 acl=96 ce=2",
+      "BENCH DLE tx=251 tx_us=17040 rx=251 rx_us=2120",
+      "BENCH FLASH id=852018 driver=generic bytes=16777216 caps=4",
+      "BENCH RSSI rc=0 dbm=-44"
+    ]
+  }
+}
