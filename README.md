@@ -199,6 +199,9 @@ are not performance guarantees for this library's default configuration.
 See [how the Mac reached 87.17 kB/s](doc/2026-09-11-mac-throughput-recipe.md)
 for the configuration, contributing changes and measurement boundaries.
 
+The [Pi follow-up and Mac port experiments](doc/2026-09-11-rpi-throughput.md)
+reached **126.88 raw kB/s mean** using an explicitly experimental UB500 HCI packet-size override.
+
 ## Tests
 
 ```

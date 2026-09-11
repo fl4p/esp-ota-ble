@@ -1,0 +1,13 @@
+{
+  "trials": 14,
+  "control_raw_rates": [
+    87.49489184375905,
+    86.19623260140588,
+    88.73560574764721
+  ],
+  "control_mean": 87.47557673093739,
+  "control_interval_ms": 10,
+  "control_chunk": 244,
+  "exploratory_peak": 89.08475789203904,
+  "pi_settings_improved_mac": false
+}

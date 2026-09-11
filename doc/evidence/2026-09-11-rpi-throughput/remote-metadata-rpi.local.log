@@ -1,0 +1,23 @@
+rpi
+Linux rpi 6.12.47+rpt-rpi-2712 #1 SMP PREEMPT Debian 1:6.12.47-1+rpt1~bookworm (2025-09-16) aarch64 GNU/Linux
+bluetoothctl: 5.66
+Index list with 2 items
+hci0:	Primary controller
+	addr AC:A7:F1:83:27:AD version 10 manufacturer 93 class 0x6c0000
+	supported settings: powered connectable fast-connectable discoverable bondable link-security ssp br/edr le advertising secure-conn debug-keys privacy static-addr phy-configuration wide-band-speech 
+	current settings: powered ssp br/edr le secure-conn 
+	name rpi #1
+	short name 
+hci1:	Primary controller
+	addr 2C:CF:67:AA:43:02 version 9 manufacturer 305 class 0x6c0000
+	supported settings: powered connectable fast-connectable discoverable bondable link-security ssp br/edr le advertising secure-conn debug-keys privacy configuration static-addr phy-configuration 
+	current settings: powered ssp br/edr le secure-conn 
+	name rpi #2
+	short name 
+hci1:	Configuration options
+	supported options: public-address 
+	missing options: 
+Supported phys: BR1M1SLOT BR1M3SLOT BR1M5SLOT EDR2M1SLOT EDR2M3SLOT EDR2M5SLOT EDR3M1SLOT EDR3M3SLOT EDR3M5SLOT LE1MTX LE1MRX LE2MTX LE2MRX LECODEDTX LECODEDRX 
+Configurable phys: BR1M3SLOT BR1M5SLOT EDR2M1SLOT EDR2M3SLOT EDR2M5SLOT EDR3M1SLOT EDR3M3SLOT EDR3M5SLOT LE2MTX LE2MRX LECODEDTX LECODEDRX 
+Selected phys: BR1M1SLOT BR1M3SLOT BR1M5SLOT EDR2M1SLOT EDR2M3SLOT EDR2M5SLOT EDR3M1SLOT EDR3M3SLOT EDR3M5SLOT LE1MTX LE1MRX LE2MTX LE2MRX LECODEDTX LECODEDRX 
+Connections:

@@ -1,0 +1,32 @@
+6640f725e562cd28ae047ae61953da56962be365aca253547db5232b2939ddae  bumble_entry.py
+78bf3268f84711cac6b882a925c451d3535967d44a1e8c2bb6b140f28c2c1d4a  node/tools/bench_ble_ota.py
+f8e4608c4faf51bec52440199f0c3e6c224bcd585c45f91142bf68e6f17467c4  esp-ota-ble/host/esp_ota_ble.py
+DISCOVERY exact_mac 7C:4F:AD:20:2A:29 None None
+Traceback (most recent call last):
+  File "/home/fab/ota-throughput-20260911/bumble_entry.py", line 142, in <module>
+    runpy.run_path(str(ROOT / target), run_name='__main__')
+  File "<frozen runpy>", line 291, in run_path
+  File "<frozen runpy>", line 98, in _run_module_code
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/fab/ota-throughput-20260911/run_ram.py", line 91, in <module>
+    asyncio.run(run(ap.parse_args()))
+  File "/usr/lib/python3.11/asyncio/runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/asyncio/base_events.py", line 653, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/fab/ota-throughput-20260911/run_ram.py", line 20, in run
+    link=await B.connect(cfg)
+         ^^^^^^^^^^^^^^^^^^^^
+  File "/home/fab/ota-throughput-20260911/bumble_entry.py", line 67, in connect
+    link = await original_connect(args, setup=setup)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/fab/ota-throughput-20260911/node/tools/bench_ble_ota.py", line 72, in connect
+    await link.open(dev,adapter=getattr(args,'adapter',None))
+  File "/home/fab/ota-throughput-20260911/esp-ota-ble/host/esp_ota_ble.py", line 406, in open
+    raise OtaBleError("could not establish a BLE link after %d attempts: %s"
+esp_ota_ble.OtaBleError: could not establish a BLE link after 3 attempts: service discovery failed: disconnected from 7C:4F:AD:20:2A:29 (reason=62)

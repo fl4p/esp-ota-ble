@@ -1,0 +1,24 @@
+Connections:
+hci0:	Type: Primary  Bus: USB
+	BD Address: AC:A7:F1:83:27:AD  ACL MTU: 1021:6  SCO MTU: 255:12
+	UP RUNNING 
+	RX bytes:2998520 acl:642 sco:0 events:140000 errors:0
+	TX bytes:5855321 acl:189188 sco:0 commands:11918 errors:0
+	Features: 0xff 0xff 0xff 0xfe 0xdb 0xfd 0x7b 0x87
+	Packet type: DM1 DM3 DM5 DH1 DH3 DH5 HV1 HV2 HV3 
+	Link policy: RSWITCH HOLD SNIFF PARK 
+	Link mode: PERIPHERAL ACCEPT 
+	Name: 'rpi #1'
+	Class: 0x6c0000
+	Service Classes: Rendering, Capturing, Audio, Telephony
+	Device Class: Miscellaneous, 
+	HCI Version: 5.1 (0xa)  Revision: 0xdfc6
+	LMP Version: 5.1 (0xa)  Subversion: 0xd922
+	Manufacturer: Realtek Semiconductor Corporation (93)
+
+< HCI Command: ogf 0x08, ocf 0x0002, plen 0
+> HCI Event: 0x0e plen 7
+  02 02 20 00 1B 00 08 
+< HCI Command: ogf 0x08, ocf 0x0002, plen 0
+> HCI Event: 0x0e plen 7
+  01 02 20 00 FB 00 07 

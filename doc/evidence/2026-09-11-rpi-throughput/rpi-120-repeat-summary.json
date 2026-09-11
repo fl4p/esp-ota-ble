@@ -1,0 +1,17 @@
+{
+  "raw_rates": [
+    128.05876621326436,
+    126.69368819079546,
+    125.8793846636093
+  ],
+  "mean": 126.87727968922304,
+  "settings": {
+    "BENCH_PHY": 2,
+    "BENCH_MAC_DISCOVERY": 1,
+    "BENCH_HCI_PACKET_OVERRIDE": 251,
+    "BENCH_INTERVAL_MS": 12.5
+  },
+  "receiver": "Graceful",
+  "adapter": "AC:A7:F1:83:27:AD",
+  "nonstandard_hci_override": true
+}

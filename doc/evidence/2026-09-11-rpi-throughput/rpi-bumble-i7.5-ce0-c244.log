@@ -1,0 +1,15 @@
+DISCOVERY adapter=hci0 address=7C:4F:AD:20:2A:29 rssi=-30
+SETUP BENCH HOST adapter_path=None
+SETUP OTAB AUTH ok
+SETUP BENCH interval requested; inspect link after settling
+SETUP BENCH LINK interval=6 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0
+SETUP BENCH BUFFERS msys1=50 size=256 msys2=96 acl=96 ce=2
+SETUP BENCH DLE tx=251 tx_us=2120 rx=251 rx_us=2120
+BUMBLE {"ce_requested_ms": 0.0, "hci_in_flight": 8, "hci_packet_bytes": 27, "interval_requested_ms": 7.5, "parameters": "Connection.Parameters(connection_interval=7.5, peripheral_latency=0, supervision_timeout=2000.0, subrate_factor=1, continuation_number=0)", "phy": "ConnectionPHY(tx_phy=<Phy.LE_2M: 2>, rx_phy=<Phy.LE_2M: 2>)", "transport": "hci0"}
+SETUP BENCH LINK interval=6 mtu=517 phy_known=1 tx=2 rx=2 timeout=200 latency=0
+SETUP BENCH DLE tx=251 tx_us=2120 rx=251 rx_us=2120
+SETUP BENCH RSSI rc=0 dbm=-29
+BENCH RAM ready
+BENCH RAM bytes=131072 us=5077614 sha=51b244050fa384a94c4c24acb4c0d5eb25eb41eee683f1e2a1b6f8401bacc3d8
+BENCH LINK interval=6 mtu=517 phy_known=1 tx=2 rx=2 timeout=200 latency=0
+RESULT {"adapter": "hci0", "after": {"base": "9f8abf18b2ad59476c71f4c3ab757b6e9bc3fb8b7f5f5a95cb64263f015ba587", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "before": {"base": "9f8abf18b2ad59476c71f4c3ab757b6e9bc3fb8b7f5f5a95cb64263f015ba587", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "burst": 1, "bytes": 131072, "chunk": 244, "fields": {"bytes": "131072", "sha": "51b244050fa384a94c4c24acb4c0d5eb25eb41eee683f1e2a1b6f8401bacc3d8", "us": "5077614"}, "host": "rpi", "host_elapsed": 5.120094217825681, "host_kB_s": 25.59952891954038, "interval": 6, "label": "Graceful", "poll_s": null, "post_link": "BENCH LINK interval=6 mtu=517 phy_known=1 tx=2 rx=2 timeout=200 latency=0", "purpose": "ram-only", "ready_callbacks": null, "ready_event": false, "receiver_kB_s": 25.813699111433046, "setup": ["BENCH HOST adapter_path=None", "OTAB AUTH ok", "BENCH interval requested; inspect link after settling", "BENCH LINK interval=6 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0", "BENCH BUFFERS msys1=50 size=256 msys2=96 acl=96 ce=2", "BENCH DLE tx=251 tx_us=2120 rx=251 rx_us=2120", "BENCH LINK interval=6 mtu=517 phy_known=1 tx=2 rx=2 timeout=200 latency=0", "BENCH DLE tx=251 tx_us=2120 rx=251 rx_us=2120", "BENCH RSSI rc=0 dbm=-29"], "verified": true, "write_fd": false}

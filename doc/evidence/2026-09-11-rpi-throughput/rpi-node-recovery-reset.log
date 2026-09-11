@@ -1,0 +1,30 @@
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x15 (USB_UART_CHIP_RESET),boot:0x8 (SPI_FAST_FLASH_BOOT)
+Saved PC:0x4037f676
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2820,len:0x10cc
+load:0x403c8700,len:0xc2c
+load:0x403cb700,len:0x30b0
+entry 0x403c88b8
+[     1][I][esp32-hal-psram.c:106] psramAddToHeap(): PSRAM added to the heap.
+=== farm node prototype boot (0) ===
+=== farm node prototype boot (1) ===
+=== farm node prototype boot (2) ===
+=== farm node prototype boot (3) ===
+=== farm node prototype boot (4) ===
+=== farm node prototype boot (5) ===
+[  2711][E][Preferences.cpp:47] begin(): nvs_open failed: NOT_FOUND
+self-update: no staged transfer (nothing to resume)
+step 1: SKIPPED - PROTO_BUS_OFF, Serial1 is never started, so GP2/GP3 stay high-impedance and R/T stays pulled down
+[  2717][E][Preferences.cpp:47] begin(): nvs_open failed: NOT_FOUND
+cadence: no stored value (NVS namespace 'cadence' absent); using the compiled 300000 ms
+running from app1
+bringing up BLE window (15 min) [USB host]
+I NimBLEDevice: NimBLE Started!
+I NimBLEDevice: NimBle host synced.
+ble: UP as farmnode-202A29, 900000 ms, nonce BEEF
+step 2: spi.begin
+*** PROTO_BLE_BENCH: LoRaWAN, the bus and sleep are all SKIPPED. The BLE window opens at boot and re-opens when it expires, and the auth nonce is a fixed compile-time constant - there is NO authentication worth the name. Bench only, never on a deployed node.
+ble: window extended, 900000 ms, nonce BEEF

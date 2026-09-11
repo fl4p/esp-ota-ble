@@ -1,0 +1,49 @@
+MainPID=3541320
+NRestarts=0
+ActiveState=active
+SubState=running
+Sep 11 07:07:05 rpi systemd[1]: Started smart-shunt-ble.service - Smart-shunt BLE telemetry client.
+Sep 11 07:07:06 rpi python3[3541320]: BLE backend: bumble
+Sep 11 07:07:06 rpi python3[3541320]: finding device..
+Sep 11 07:07:06 rpi python3[3541320]: connecting to 34:85:18:98:15:89 None None  [20s budget]
+Sep 11 07:07:07 rpi python3[3541320]: !!! received notification with no subscriber
+Sep 11 07:07:07 rpi python3[3541320]: char 00001800-0000-1000-8000-00805f9b34fb 00002a00-0000-1000-8000-00805f9b34fb ['read']
+Sep 11 07:07:07 rpi python3[3541320]: char 00001800-0000-1000-8000-00805f9b34fb 00002a01-0000-1000-8000-00805f9b34fb ['read']
+Sep 11 07:07:07 rpi python3[3541320]: char 00001801-0000-1000-8000-00805f9b34fb 00002a05-0000-1000-8000-00805f9b34fb ['indicate']
+Sep 11 07:07:07 rpi python3[3541320]: char 00001801-0000-1000-8000-00805f9b34fb 00002b3a-0000-1000-8000-00805f9b34fb ['read']
+Sep 11 07:07:07 rpi python3[3541320]: char 00001801-0000-1000-8000-00805f9b34fb 00002b29-0000-1000-8000-00805f9b34fb ['read', 'write']
+Sep 11 07:07:07 rpi python3[3541320]: char e8308d3d-c3b4-45ff-ba58-9c0fb99d0ecb df51a73d-0b60-43a5-bc86-a043f3841152 ['read', 'indicate']
+Sep 11 07:07:07 rpi python3[3541320]: char e8308d3d-c3b4-45ff-ba58-9c0fb99d0ecb b0e0d1a4-7f52-4a3e-9c61-2d8f5b3ae741 ['write', 'notify']
+Sep 11 07:07:07 rpi python3[3541320]: char e8308d3d-c3b4-45ff-ba58-9c0fb99d0ecb b0e0d1a5-7f52-4a3e-9c61-2d8f5b3ae741 ['write-without-response']
+Sep 11 07:07:07 rpi python3[3541320]: char e8308d3d-c3b4-45ff-ba58-9c0fb99d0ecb b952dad5-9541-4852-bab6-96b9cbc9131a ['read', 'write', 'notify']
+Sep 11 07:07:08 rpi python3[3541320]: aux: loaded /home/fab/pwr-metering/aux-state.json -> {'34:85:18:98:15:89': False}
+Sep 11 07:07:08 rpi python3[3541320]: board: 34:85:18:98:15:89 -> ftr
+Sep 11 07:07:08 rpi python3[3541320]: 34:85:18:98:15:89 device has no time sync, started 412965.2s ago
+Sep 11 07:07:08 rpi python3[3541320]:        ftr_SHUNT_ADC 1789103228344*? 146  u=-0.0000V   i=-0.0000A   t=25.5°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:08 rpi python3[3541320]:             ftr_DCCT 1789103228344*? 146  u=nanV   i=nanA   t=nan°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:08 rpi python3[3541320]: waiting for 7C:4F:AD:1E:9A:BD (?): no data for 0s, last advertisement 0s ago
+Sep 11 07:07:08 rpi python3[3541320]: connecting to 7C:4F:AD:1E:9A:BD None None  [20s budget]
+Sep 11 07:07:08 rpi python3[3541320]:           ftr_t17_48 1789103228646*?  97  u=nanV   i=nanA   t=21.7°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:08 rpi python3[3541320]:           ftr_t17_49 1789103228474*? 186  u=nanV   i=nanA   t=21.7°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:08 rpi python3[3541320]:           ftr_t17_4A 1789103228646*?  17  u=nanV   i=nanA   t=21.7°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:08 rpi python3[3541320]:          ftr_t17b_48 1789103228646*  99  u=nanV   i=nanA   t=21.7°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:08 rpi python3[3541320]:        ftr_SHUNT_ADC 1789103228638* 147  u=-0.0000V   i=-0.0000A   t=25.5°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:08 rpi python3[3541320]:             ftr_DCCT 1789103228639* 147  u=nanV   i=nanA   t=nan°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:09 rpi python3[3541320]:        ftr_SHUNT_ADC 1789103228850* 148  u=-0.0000V   i=-0.0000A   t=25.5°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:09 rpi python3[3541320]:             ftr_DCCT 1789103228849* 148  u=nanV   i=nanA   t=nan°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:09 rpi python3[3541320]: !!! received notification with no subscriber
+Sep 11 07:07:09 rpi python3[3541320]:           ftr_t17_49 1789103229453* 187  u=nanV   i=nanA   t=21.7°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:09 rpi python3[3541320]:        ftr_SHUNT_ADC 1789103229303* 149  u=-0.0000V   i=-0.0000A   t=25.5°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:09 rpi python3[3541320]:             ftr_DCCT 1789103229304* 149  u=nanV   i=nanA   t=nan°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:09 rpi python3[3541320]:           ftr_t17_48 1789103229629*  98  u=nanV   i=nanA   t=21.7°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:09 rpi python3[3541320]:           ftr_t17_4A 1789103229757*  18  u=nanV   i=nanA   t=21.7°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:09 rpi python3[3541320]:          ftr_t17b_48 1789103229758* 100  u=nanV   i=nanA   t=21.7°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:09 rpi python3[3541320]:        ftr_SHUNT_ADC 1789103229724* 150  u=-0.0000V   i=-0.0000A   t=25.5°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:09 rpi python3[3541320]:             ftr_DCCT 1789103229724* 150  u=nanV   i=nanA   t=nan°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:10 rpi python3[3541320]:        ftr_SHUNT_ADC 1789103230183* 151  u=0.0000V   i=0.0000A   t=25.5°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:10 rpi python3[3541320]:             ftr_DCCT 1789103230184* 151  u=nanV   i=nanA   t=nan°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:10 rpi python3[3541320]:           ftr_t17_48 1789103230639*  99  u=nanV   i=nanA   t=21.7°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:10 rpi python3[3541320]:           ftr_t17_49 1789103230488* 188  u=nanV   i=nanA   t=21.7°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:10 rpi python3[3541320]:           ftr_t17_4A 1789103230660*  19  u=nanV   i=nanA   t=21.7°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:10 rpi python3[3541320]:        ftr_SHUNT_ADC 1789103230572* 152  u=-0.0000V   i=-0.0000A   t=25.5°C    rssi=-40 tx_pow=None,
+Sep 11 07:07:10 rpi python3[3541320]:             ftr_DCCT 1789103230573* 152  u=nanV   i=nanA   t=nan°C    rssi=-40 tx_pow=None,

@@ -1,0 +1,12 @@
+{
+  "host": "rpi",
+  "verified": true,
+  "known_bad": "502-byte HCI, correct length but wrong SHA rejected",
+  "ram_6MiB_ms_per_check": 4.1244569211266935,
+  "flash_us_per_check": 0.7422218099236488,
+  "source_sha256": {
+    "run_ram.py": "83e0a485a9f2f3a7bb7e14512b276f4f3e9858892765b7986506dc0859be5e9b",
+    "node/tools/bench_ble_ota.py": "78bf3268f84711cac6b882a925c451d3535967d44a1e8c2bb6b140f28c2c1d4a",
+    "check_rpi_verifiers.py": "7e89e76e243d428a36d186295c2893b155de0b930230c51465f00dbec7a72167"
+  }
+}

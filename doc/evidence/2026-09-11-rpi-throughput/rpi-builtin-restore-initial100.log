@@ -1,0 +1,26 @@
+BUMBLE initial_interval_ms=100.0 initial_timeout_ms=4000
+DISCOVERY exact_mac 7C:4F:AD:20:2A:29 None None
+Traceback (most recent call last):
+  File "/home/fab/ota-throughput-20260911/bumble_entry.py", line 140, in <module>
+    exec("if True:" + cli, namespace)
+  File "<string>", line 19, in <module>
+  File "/usr/lib/python3.11/asyncio/runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/asyncio/base_events.py", line 653, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/fab/ota-throughput-20260911/node/tools/bench_ble_ota.py", line 175, in run
+    link = await connect(args)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/fab/ota-throughput-20260911/bumble_entry.py", line 67, in connect
+    link = await original_connect(args, setup=setup)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/fab/ota-throughput-20260911/node/tools/bench_ble_ota.py", line 72, in connect
+    await link.open(dev,adapter=getattr(args,'adapter',None))
+  File "/home/fab/ota-throughput-20260911/esp-ota-ble/host/esp_ota_ble.py", line 406, in open
+    raise OtaBleError("could not establish a BLE link after %d attempts: %s"
+esp_ota_ble.OtaBleError: could not establish a BLE link after 3 attempts: service discovery failed: disconnected from 7C:4F:AD:20:2A:29 (reason=62)

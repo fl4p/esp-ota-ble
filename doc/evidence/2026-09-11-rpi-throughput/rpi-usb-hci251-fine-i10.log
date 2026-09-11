@@ -1,0 +1,21 @@
+0924cec1d32e3c0939c781a34bfafd867d782d1db6743541e04eda1764ff499b  bumble_entry.py
+78bf3268f84711cac6b882a925c451d3535967d44a1e8c2bb6b140f28c2c1d4a  node/tools/bench_ble_ota.py
+f8e4608c4faf51bec52440199f0c3e6c224bcd585c45f91142bf68e6f17467c4  esp-ota-ble/host/esp_ota_ble.py
+DISCOVERY exact_mac 7C:4F:AD:20:2A:29 'farmnode-202A29' 'farmnode-202A29'
+SETUP BENCH HOST adapter_path=None
+SETUP OTAB AUTH ok
+SETUP BENCH interval requested; inspect link after settling
+SETUP BENCH LINK interval=6 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0
+SETUP BENCH BUFFERS msys1=50 size=256 msys2=96 acl=96 ce=2
+SETUP BENCH DLE tx=251 tx_us=2120 rx=251 rx_us=2120
+EXPERIMENT NONSTANDARD HCI packet bytes initial_host_queue=27 override=251 credits_unchanged=8
+BUMBLE explicit_bench_characteristic_capacity=512 mtu=517 max_value=512
+BUMBLE LIVE LE BUFFER packet_bytes=27 credits=8 host_queue_bytes=251
+BUMBLE {"ce_requested_ms": 0.0, "hci_in_flight": 8, "hci_initial_host_packet_bytes": 27, "hci_packet_bytes": 251, "hci_reported_packet_bytes": 27, "interval_requested_ms": 10.0, "parameters": "Connection.Parameters(connection_interval=10.0, peripheral_latency=0, supervision_timeout=2000.0, subrate_factor=1, continuation_number=0)", "phy": "ConnectionPHY(tx_phy=<Phy.LE_2M: 2>, rx_phy=<Phy.LE_2M: 2>)", "transport": "AC:A7:F1:83:27:AD"}
+SETUP BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2 timeout=200 latency=0
+SETUP BENCH DLE tx=251 tx_us=2120 rx=251 rx_us=2120
+SETUP BENCH RSSI rc=0 dbm=-34
+BENCH RAM ready
+BENCH RAM bytes=524288 us=7113496 sha=678b3d12a6d1d76449cef5c27d5316c5c19a5f08a6025fdbf16e1592e3cb479c
+BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2 timeout=200 latency=0
+RESULT {"adapter": "AC:A7:F1:83:27:AD", "after": {"base": "9f8abf18b2ad59476c71f4c3ab757b6e9bc3fb8b7f5f5a95cb64263f015ba587", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "before": {"base": "9f8abf18b2ad59476c71f4c3ab757b6e9bc3fb8b7f5f5a95cb64263f015ba587", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "burst": 1, "bytes": 524288, "chunk": 495, "fields": {"bytes": "524288", "sha": "678b3d12a6d1d76449cef5c27d5316c5c19a5f08a6025fdbf16e1592e3cb479c", "us": "7113496"}, "host": "rpi", "host_elapsed": 7.167857848107815, "host_kB_s": 73.14430770113593, "interval": 6, "label": "Graceful", "poll_s": null, "post_link": "BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2 timeout=200 latency=0", "purpose": "ram-only", "ready_callbacks": null, "ready_event": false, "receiver_kB_s": 73.70328176187911, "setup": ["BENCH HOST adapter_path=None", "OTAB AUTH ok", "BENCH interval requested; inspect link after settling", "BENCH LINK interval=6 mtu=517 phy_known=1 tx=2 rx=2 timeout=72 latency=0", "BENCH BUFFERS msys1=50 size=256 msys2=96 acl=96 ce=2", "BENCH DLE tx=251 tx_us=2120 rx=251 rx_us=2120", "BENCH LINK interval=8 mtu=517 phy_known=1 tx=2 rx=2 timeout=200 latency=0", "BENCH DLE tx=251 tx_us=2120 rx=251 rx_us=2120", "BENCH RSSI rc=0 dbm=-34"], "verified": true, "write_fd": false}

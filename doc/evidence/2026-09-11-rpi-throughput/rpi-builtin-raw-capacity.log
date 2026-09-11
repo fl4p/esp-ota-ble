@@ -1,0 +1,34 @@
+DISCOVERY exact_mac 7C:4F:AD:20:2A:29 None None
+SETUP BENCH HOST adapter_path=None
+SETUP OTAB AUTH ok
+SETUP BENCH interval requested; inspect link after settling
+SETUP BENCH LINK interval=6 mtu=517 phy_known=1 tx=1 rx=1 timeout=72 latency=0
+BUMBLE explicit_bench_characteristic_capacity=512 mtu=517 max_value=512
+ignoring request, command not supported
+BUMBLE {"ce_requested_ms": 0.0, "hci_in_flight": 7, "hci_packet_bytes": 251, "interval_requested_ms": 7.5, "parameters": "Connection.Parameters(connection_interval=7.5, peripheral_latency=0, supervision_timeout=2000.0, subrate_factor=1, continuation_number=0)", "phy": "ConnectionPHY(tx_phy=<Phy.LE_1M: 1>, rx_phy=<Phy.LE_1M: 1>)", "transport": "2C:CF:67:AA:43:02"}
+SETUP BENCH LINK interval=6 mtu=517 phy_known=1 tx=1 rx=1 timeout=200 latency=0
+SETUP BENCH DLE tx=251 tx_us=2120 rx=251 rx_us=2120
+SETUP BENCH RSSI rc=0 dbm=-46
+BEFORE {"base": "9f8abf18b2ad59476c71f4c3ab757b6e9bc3fb8b7f5f5a95cb64263f015ba587", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}
+LINK mtu=517 max_write=512 chunk=244
+[0.389] OTAB RING 262144
+[0.389] OTAB READY part=app0 size=754624 xform=raw out=754624
+[8.280] OTAB STAT write_ms=2471 calls=1607 erase_ms=2153 out=754624
+[8.468] OTAB SKIP kept=0 wrote=185 erases=11 erase_ms=2153
+[8.468] OTAB FLASH mode=internal program_bytes=754624 erase_bytes=757760
+[8.468] OTAB TIME begin_ms=210 program_ms=2469 compare_us=0
+[8.468] OTAB OK rebooting
+[8.468] BENCH REBOOT graceful=1
+DISCOVERY exact_mac 7C:4F:AD:20:2A:29 None None
+SETUP BENCH HOST adapter_path=None
+SETUP OTAB AUTH ok
+BUMBLE explicit_bench_characteristic_capacity=512 mtu=517 max_value=512
+ignoring request, command not supported
+BUMBLE {"ce_requested_ms": 0.0, "hci_in_flight": 7, "hci_packet_bytes": 251, "interval_requested_ms": 7.5, "parameters": "Connection.Parameters(connection_interval=7.5, peripheral_latency=0, supervision_timeout=2000.0, subrate_factor=1, continuation_number=0)", "phy": "ConnectionPHY(tx_phy=<Phy.LE_1M: 1>, rx_phy=<Phy.LE_1M: 1>)", "transport": "2C:CF:67:AA:43:02"}
+SETUP OTAB FAIL bad-command
+SETUP OTAB FAIL command rejected
+SETUP OTAB FAIL bad-command
+SETUP OTAB FAIL command rejected
+SETUP OTAB FAIL bad-command
+SETUP OTAB FAIL command rejected
+RESULT {"adapter": "2C:CF:67:AA:43:02", "after": {"base": "f408a9dc9eb8a54e57a26d1ae3792059e1bfdad8e5991003dc0ba0d7b5c51de0", "resume": null, "resume_capable": true, "run": "app0", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "before": {"base": "9f8abf18b2ad59476c71f4c3ab757b6e9bc3fb8b7f5f5a95cb64263f015ba587", "resume": null, "resume_capable": true, "run": "app1", "slot": 1572864, "xforms": ["raw", "tamp", "delta"]}, "burst": 1, "bytes": 754624, "chunk": 244, "elapsed": 8.548857531044632, "flash": {"erase_bytes": "757760", "mode": "internal", "program_bytes": "754624"}, "host": "rpi", "image": "node_X.bin", "image_kB_s": 88.27191203732558, "kB_s": 88.27191203732558, "name": "farmnode-202A29", "negotiated_setup": ["BENCH HOST adapter_path=None", "OTAB AUTH ok", "BENCH interval requested; inspect link after settling", "BENCH LINK interval=6 mtu=517 phy_known=1 tx=1 rx=1 timeout=72 latency=0", "BENCH LINK interval=6 mtu=517 phy_known=1 tx=1 rx=1 timeout=200 latency=0", "BENCH DLE tx=251 tx_us=2120 rx=251 rx_us=2120", "BENCH RSSI rc=0 dbm=-46"], "paced_writes": 0, "payload_build_s": 1.834006980061531e-06, "poll_s": null, "purpose": "measure", "ready_callbacks": null, "ready_event": false, "real_write": true, "setup": ["interval 6", "link"], "skip": {"erase_ms": "2153", "erases": "11", "kept": "0", "wrote": "185"}, "stats": {"calls": "1607", "erase_ms": "2153", "out": "754624", "write_ms": "2471"}, "timing": {"begin_ms": "210", "compare_us": "0", "program_ms": "2469"}, "transfer_hint": true, "verified": true, "wire": "raw", "wire_bytes": 754624, "write_fd": false}

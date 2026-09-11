@@ -1,0 +1,28 @@
+!!! no pending response future to set
+!!! no pending response future to set
+Traceback (most recent call last):
+  File "/home/fab/ota-throughput-20260911/bumble_entry.py", line 103, in <module>
+    runpy.run_path(str(ROOT / target), run_name='__main__')
+  File "<frozen runpy>", line 291, in run_path
+  File "<frozen runpy>", line 98, in _run_module_code
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/fab/ota-throughput-20260911/run_ram.py", line 91, in <module>
+    asyncio.run(run(ap.parse_args()))
+  File "/usr/lib/python3.11/asyncio/runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/asyncio/base_events.py", line 653, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/fab/ota-throughput-20260911/run_ram.py", line 20, in run
+    link=await B.connect(cfg)
+         ^^^^^^^^^^^^^^^^^^^^
+  File "/home/fab/ota-throughput-20260911/bumble_entry.py", line 42, in connect
+    link = await original_connect(args, setup=setup)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/fab/ota-throughput-20260911/node/tools/bench_ble_ota.py", line 70, in connect
+    raise RuntimeError('bench device not found')
+RuntimeError: bench device not found

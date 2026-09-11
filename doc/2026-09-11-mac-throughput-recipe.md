@@ -70,3 +70,9 @@ transformed-image rates above 100 are separate measurements.
 
 These artifacts preserve the tested bench implementation. The receiver
 variants and Swift frontend have not been promoted to production defaults.
+
+The [Pi follow-up and native Mac port trials](2026-09-11-rpi-throughput.md)
+subsequently reached 126.88 raw kB/s on the Pi with an experimental USB HCI
+override. Fourteen additional native Mac raw rewrites found no gain from
+the Pi's interval/packing settings; the Mac retained 10 ms and 244-byte
+values, with a fresh three-run mean of 87.48 kB/s.

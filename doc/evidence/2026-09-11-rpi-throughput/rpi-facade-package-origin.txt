@@ -1,0 +1,10 @@
+Name: bumble-bleak
+Version: 0.1.0
+Summary: A bleak-compatible BLE central API for Linux, backed by Bumble (no BlueZ/D-Bus, no kernel BT stack).
+Home-page: 
+Author: Fabian
+Author-email: 
+License: MIT
+Location: /home/fab/pwr-metering/venv/lib/python3.11/site-packages
+Requires: bumble
+Required-by: 
