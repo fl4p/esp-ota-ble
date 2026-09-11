@@ -181,3 +181,75 @@ sh test/run.sh
    not suppress a warning. Guard plus AsyncMock cost measured 12.78 µs/write
    over 10,000 calls on this Mac (mock overhead included), below 0.7% of a
    495-byte write budget at 120 kB/s. This is not a throughput measurement.
+
+## Final integration handoff, 2026-09-11
+
+Implementation and review are complete in the local source trees:
+
+| Repository | Commit | Change |
+| --- | --- | --- |
+| esp-ota-ble | `90fa09c` | Shared options, native Mac/Bumble transports, borrowed-client API, tests and evidence. |
+| fugu-mppt-firmware | `1ff63e5` | Direct OTA uses shared transport settings and exact boot verification. |
+| node-prototype | `40fcd70` | OTA options, pacing and verification-reconnect propagation. |
+| pwr-metering | `862cadd` | Smart-shunt OTA options and exact boot verification. |
+| farming | `822c43d` | Keeper session transport options, ownership, cleanup and tests. |
+| farming | `22a6a05` | Independent-review fix: reuse the existing CTRL subscription. |
+
+These integration commits were made locally; this session did not push them
+or advance the farming node-prototype gitlink. Unrelated shared-tree changes
+were preserved. The private test snapshots remain under
+`/Users/fab/o2p-push/ota-tools-integration/`.
+
+### Independent review and correction
+
+The reviewer found one P2: `DirectLink.open()` subscribed to CTRL, then the
+keeper session subscribed again. CoreBluetooth rejects that second request
+before authentication. Commit `22a6a05` forwards the shared connector's
+existing line handler into `BleBusLink._on_ctrl`; the legacy connection path
+still subscribes directly, and BUS retains its separate subscription.
+
+The revised test transport subscribes during open and its fake client rejects
+duplicates. It failed against the previous code and passed with the fix.
+The reviewer independently confirmed the correction, passed all 15 shared
+transport tests, two native IPC tests and five keeper session tests, and
+reported no remaining actionable findings. The combined keeper CLI/HTTP suite
+also passed 102 checks; the actual `serve --help` exposed the shared options.
+
+### Keeper coordination and remaining work
+
+The keeper owner on channel `otab` (`codex-farming-hhkl`) implemented and tested
+the CLI wiring in `farming/tech/chirpstack/o2p_ble_keeper.py` and
+`test_o2p_ble_keeper_http.py`. It resolves the options once, passes nondefault
+options into the session, and keeps the default legacy path. The owner last
+reported that this CLI change remained uncommitted, with a patch at
+`/tmp/keeper-wiring.patch`; its commit is separate from the session commits
+above. This status was unchanged at this handoff.
+
+The owner reported deploying the keeper CLI to farmgw with tuning dormant:
+the shared transport module was not yet installed there and no new flags
+were passed. Deploy the library, latest session including `22a6a05`, and
+keeper together, with one coordinated restart through `keeper-loop.sh`.
+No farmgw throughput improvement or active Bumble deployment is established
+by the source integration tests.
+
+Remaining work is explicit:
+
+1. Finish the keeper owner's CLI commit and coordinated farmgw deployment.
+2. Identify the current `96689e...` bench image before replacing it, then run
+   repeated full-write/boot-verified tests of the packaged senders. Historical
+   Pi **126.88 kB/s** and Mac **87.48 kB/s** results remain in the linked
+   throughput reports; the new packaging currently has connection/negotiation
+   probes, not a new full-write result.
+3. Diagnose the intermittent Pi controller startup command-response mismatch.
+   The successful USB negotiation probe does not qualify restart reliability.
+4. Validate the keeper owner's separate node firmware interval request
+   (15–30 ms, zero latency) on the live farm connection. It was reported built
+   but uncommitted/unverified on hardware; actual negotiated timing must be
+   captured rather than inferred from the request.
+
+The Pi smart-shunt collector was restored active and fresh telemetry observed
+at the end of the hardware work. The bench image was unchanged. Experimental
+HCI packet sizing remains behind its explicit flag; neither a default backend
+nor the keeper enables it automatically. Future node OTA over the keeper's
+held connection can use `attach`, but a `/update-node` endpoint was not
+implemented by this work.
