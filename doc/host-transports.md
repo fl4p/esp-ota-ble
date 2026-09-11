@@ -197,8 +197,9 @@ Implementation and review are complete in the local source trees:
 
 These integration commits were made locally; this session did not push them
 or advance the farming node-prototype gitlink. Unrelated shared-tree changes
-were preserved. The private test snapshots remain under
-`/Users/fab/o2p-push/ota-tools-integration/`.
+were preserved. The private test snapshots were under
+`/Users/fab/o2p-push/ota-tools-integration/`; that scratch workspace was
+subsequently removed as recorded below.
 
 ### Independent review and correction
 
@@ -253,3 +254,32 @@ HCI packet sizing remains behind its explicit flag; neither a default backend
 nor the keeper enables it automatically. Future node OTA over the keeper's
 held connection can use `attach`, but a `/update-node` endpoint was not
 implemented by this work.
+
+## Scratch cleanup, 2026-09-11
+
+At the user's request, `/Users/fab/o2p-push` was deleted and its six Git
+worktree registrations removed. It occupied approximately 12 GB. Before
+removal, all 35 changed/new non-cache files across the five integration
+worktrees were compared byte-for-byte with their implementation commits;
+all matched. No process had its working directory there, and no running
+benchmark command was found.
+
+Unique earlier experiments were retained in a **private local recovery
+archive**, outside the repository:
+
+* Path: `/Users/fab/ota-bench-recovery-20260911T100425.tar.gz`
+* Size: 206,294,727 bytes; mode `0600`.
+* SHA-256: `132a91591e528a538713a718c78b172a19e5eac9065a99f083b430d5f8725769`
+* 1,040 files: experiment scripts/logs, firmware binaries/debug images,
+  source/build snapshots and patches for the earlier node worktrees.
+* `recovery/MANIFEST.json` holds per-file SHA-256 values, all verified after
+  writing the archive. `recovery/metadata.json` records the source base
+  commits and exclusions.
+
+SDKs, managed dependencies, virtual environments, build caches and browser
+research caches were discarded. The archive is not committed; firmware and
+local configuration remain private. Committed implementations and public
+evidence remain in their normal repositories. Historical absolute scratch
+paths in the measurement logs now refer to this removed environment; recover
+needed files from the archive and recreate dependencies before replaying.
+The Pi's separate experiment directory was not removed.
