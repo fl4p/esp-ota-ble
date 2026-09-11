@@ -196,6 +196,8 @@ and over **120 image kB/s** for transformed full rewrites. They cover flash batc
 PSRAM execution, controller/host settings, CoC, and the additional Pi centrals.
 The archived receiver variants and native sender are bench experiments; those figures
 are not performance guarantees for this library's default configuration.
+See [how the Mac reached 87.17 kB/s](doc/2026-09-11-mac-throughput-recipe.md)
+for the configuration, contributing changes and measurement boundaries.
 
 ## Tests
 
