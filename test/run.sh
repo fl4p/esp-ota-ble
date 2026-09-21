@@ -54,3 +54,10 @@ run_suite "erase strategy: skip identical sectors"
 python3 test/test_tamp_compat.py
 python3 test/test_transport.py
 python3 test/test_native_transport.py
+
+# Host side. Pure stdlib -- no bleak, no radio. These cover the halves of the protocol the C++
+# suite structurally cannot reach: what a host does when the RECEIVER is the old one.
+for t in test/test_find_device.py test/test_resume_host.py test/test_host_helpers.py; do
+    echo "--- $t"
+    python3 "$t" 2>&1 | tail -3
+done

@@ -20,15 +20,46 @@ Control lines in (from the host), status lines out (to the host):
 
 ```
 host → device : begin <size> <sha256hex>   arm: pick the passive slot, quiesce, open the OTA handle
+                resume <off> <size> <sha>  arm at <off> instead of 0, continuing an interrupted push
                 end                        finalize: verify length + digest, set boot slot, reboot
                 abort                      tear down, leave the boot slot alone
 
-device → host : OTAB READY part=<label> size=<n>
+device → host : OTAB READY part=<label> size=<n>            (+ ` from=<off>` on a resumed transfer)
                 OTAB CRED <cumulative byte offset the host may stream up to>
                 OTAB PROG <written>/<size>
+                OTAB RESUME <off> <size> | none             (part of the `info` reply)
                 OTAB OK rebooting
                 OTAB FAIL <reason>
 ```
+
+## Resume
+
+A dropped link no longer costs the whole transfer. The receiver remembers the sector-aligned prefix
+it can prove is in the update slot, `info` advertises it as `OTAB RESUME <off> <size>`, and a
+`resume` naming the same offset, size and digest picks the transfer back up there.
+
+**The digest still covers the whole image, and it covers the bytes that will actually boot.** A
+resumed session re-hashes the already-flashed prefix by reading it back out of the slot rather than
+trying to carry a SHA-256 context across the drop — so a resume onto a prefix of a different build,
+a clobbered slot or a wrong offset all end at `OTAB FAIL sha-mismatch` with the boot partition
+untouched. Resume cannot splice two images; the worst it can do is waste a transfer.
+
+Raw only, and within a session or across a reconnect — not across a reboot. **`doc/resume.md` is the
+design note**: why the digest is recomputed rather than carried, why the offset is the receiver's
+number and not the host's, how the capability is negotiated in both directions, and what is
+explicitly out of scope.
+
+Host side:
+
+```python
+info = await O.query_info(link)
+xform, payload = O.choose_payload(image, info)
+off = O.resume_offset(info, payload, xform, on_note=print)   # 0 unless every check passes
+ok  = await O.push_image(link, payload, xform=xform, out_size=len(image), resume_from=off)
+```
+
+`push_image()` falls back to a fresh `begin` if the receiver refuses the resume for any reason at
+all, including being too old to know the command — which is what makes it safe to try.
 
 Firmware bytes go on a separate write-without-response channel, chunked at the negotiated ATT MTU
 minus 3, and the host must never stream past the most recent `CRED` offset. Violating that window
@@ -212,7 +243,9 @@ reached **126.88 raw kB/s mean** using an explicitly experimental UB500 HCI pack
 
 Host-native (clang++, ASan/UBSan), no hardware, and run three times — once per erase strategy, since
 the two the default displaces are still reachable fallbacks and compiling only the default would
-leave them unbuilt as well as untested.
+leave them unbuilt as well as untested. It then runs the two Python suites (stdlib only, no bleak,
+no radio), which cover the half of the protocol the C++ suite structurally cannot reach: what a
+**host** does when the receiver is the old one.
 
 ESP-IDF is shimmed in `test/host-stub/`. The fake partition models *when* erases happen — begin-time
 versus per-write — because that is the axis the `OTA_WITH_SEQUENTIAL_WRITES` choice turns on, and a
@@ -258,6 +291,32 @@ A console-hosted receiver (NUS, `ota-ble begin ...`) passes
 its RX/TX characteristics. A transport this module does not know about — fugu
 tunnels GATT through an ESPHome `bluetooth_proxy` — is wrapped with
 `O.adapt_link(link)`.
+
+### What a `link` has to be
+
+`push_image()` and `query_info()` duck-type `link`, and the interface was being rediscovered by
+reading their bodies — fugu implements it twice, the farm node once. **`OtaLink` writes it down**:
+`set_line_handler`, `write_cmd`, `write_fw`, `chunk`, `disconnected` (an `asyncio.Event`), plus the
+optional `mtu` and `_on_line`. Nothing is enforced by inheritance; `require_link()` checks presence
+at the top of each call, so a link missing `disconnected` fails by name immediately rather than as
+an `AttributeError` on the failure path a hundred seconds into a transfer.
+
+### Helpers the consumer tools used to each carry
+
+Lifted 2026-09-10 from copies that had already diverged:
+
+* `read_local_app_desc(path_or_bytes)` — the version string from a `.bin`'s `esp_app_desc_t`.
+* `progress_bar(done, total, label)`.
+* `image_keeps_the_push_path(data, markers, mode="all"|"any")` — **the brick guard**. Does the image
+  you are about to push still contain the transport you would need to push the *next* one? Both
+  markers and quantifier are arguments, because the node needs *all* of `OTAB CRED`/`OTAB READY`
+  while fugu accepts *any* of a wider BLE-build marker set. An empty marker set or an unrecognised
+  mode raises rather than passing — `all(())` is `True`, and on a buried node this guard is the
+  difference between a bad build and a device that needs a cable.
+* `image_is_running(info, image)` — the *criterion* half of the post-push confirmation the module
+  tells every caller to do: `OTAB BASE` equals the image's own appended SHA-256, so it says *which*
+  image is running rather than merely that something rebooted. Tri-state; `None` means could not
+  tell and is not a success. The *waiting* stays in the callers, which have nothing in common there.
 
 ### The reason it exists: `usable_chunk()`
 

@@ -18,11 +18,101 @@
 // Staging ring: otaBleStageBytes (producer/BLE host task) only copies bytes in here; otaBleTick
 // (consumer) drains to flash. Decoupling keeps the slow esp_ota_write off the host task -- a stall
 // there trips the BLE supervision timeout. Capacity doubles as the host's credit window.
-// Kept small (8 KB): on a no-PSRAM board internal heap is tight and fragmented, and BLE throughput
-// (~tens of KB/s) is far below what this window sustains, so the credit round-trip never bottlenecks.
-static constexpr size_t RING_CAP = 8 * 1024;
+// Kept small (8 KB): on a no-PSRAM board internal heap is tight and fragmented.
+//
+// This used to add "so the credit round-trip never bottlenecks". That claim was unsupported, and
+// the ring-size measurements below are what actually bear on it. Measured 2026-09-10, farm node
+// (ESP32-S3), one complete raw push from macOS: 751 744 B in 108.58 s, while the MIDDLE HALF of the
+// same transfer moved 375 808 B in 14.34 s. Those are 6.76 and 25.59 KiB/s -- BINARY units; an
+// earlier version of this comment labelled them kB/s, which differs by 2.4 %.
+//
+// WHAT THAT RUN DOES *NOT* ESTABLISH, corrected 2026-09-12 after an adversarial review:
+//   - "13.1 s of it was flash" was DOUBLE COUNTING. write_ms times the whole otaXformFeed() call
+//     (see below), and under the sector-buffer strategy that INCLUDES the erase inside
+//     commitSector() which erase_ms also counts. 5.531 s sits inside 7.587 s; they do not add.
+//     The counters also exclude the initial erase (before they reset) and the final partial-sector
+//     commit and validation (after OTAB STAT), so they are not disjoint end-to-end accounting.
+//   - "three quarters of the wall clock was neither link nor flash" EXTRAPOLATED the middle rate
+//     across the whole transfer. That is a gap against an assumed sustained rate, not measured
+//     idle time. READY, credit-wait and flush durations were never timestamped.
+//   - Whether that push WROTE the image at all is unverified: no OTAB SKIP line was captured.
+//     A receiver that skips matching sectors can complete, verify and reboot having programmed
+//     almost nothing. See ~/dev/kb/esp32/ota-throughput-numbers-are-meaningless-without-the-
+//     sector-skip-line.md -- claiming a full rewrite needs kept=0 with wrote/erases equal to
+//     ceil(bytes/4096).
+//
+// The mechanism is this window, and it is working as designed: grantCredit() advances the host to
+// written + ringCap, where `written` counts bytes the CONSUMER has drained, so the host can never
+// run more than one window ahead of the flush. That makes the window a pacing mechanism whose throughput
+// is set by how promptly otaBleTick() is called -- not a bug, but not "never a bottleneck" either.
+//
+// A PREVIOUS VERSION BLAMED THE CALLER'S RS-485 POLL for that run, and that attribution is WRONG:
+// the farm node's loop() returns early on ble_ota_flash_busy() -- set for the WHOLE transfer by the
+// quiesce hook, not per write -- long before it reaches the poll, so no poll can run mid-transfer.
+// The tick-latency contract on otaBleTick() in ota_ble.h still stands on its own terms; it just was
+// not what that measurement showed.
+//
+// THE WINDOW IS SIZED AT RUNTIME, but the size that wins is still the small one - see the
+// measurements on RING_CAP_PSRAM below, which tried 256 KB on a board with 8 MB of PSRAM and came
+// out SLOWER than 8 KB once the host stopped losing writes. The runtime sizing is kept because it
+// is the mechanism a future measurement would need; the value is not an aspiration.
+//
+// RING_CAP_MIN is what a no-PSRAM board gets, and on today's evidence it is also the fast path.
+static constexpr size_t RING_CAP_MIN   = 8 * 1024;
+// PSRAM SIZING: THE MEASUREMENT THAT MATTERS IS A PUSH THAT ACTUALLY WRITES FLASH.
+//
+// This constant was set to 256 KB, then parked back at 8 KB on a comparison that was
+// CONFOUNDED, and the retraction is worth more than the number. Measured 2026-09-10, bench
+// ESP32-S3 with 8 MB PSRAM, 717 904-byte raw image, all runs complete and digest-verified.
+//
+// Re-pushing an image the slot ALREADY holds costs almost no flash: the sector-skip path
+// (see commitSector) keeps 175 of 176 sectors and erases one, `OTAB SKIP kept=175 wrote=1
+// erase_ms=45`. Those pushes measure the LINK and the comparison, not an OTA:
+//
+//     ring   8 KB   24.48 / 23.42 / 26.18 kB/s   (Mac)      kept=175 wrote=1
+//     ring 256 KB   15.31 kB/s                              kept=175 wrote=1
+//
+// A push that writes the whole slot - `erase_ms` near 8700, i.e. ~176 sector erases - is a
+// completely different machine, and it is the only one that says what an OTA costs:
+//
+//     ring   8 KB, no host flow control    1.88 kB/s
+//     ring   8 KB, host flow control       2.37 kB/s
+//     ring 256 KB, host flow control      12.88 kB/s   <-- 5.4x
+//
+// So the ring DOES decouple the link from flash, exactly as the argument above says, and the
+// earlier "8 KB wins" reading came from putting a real 256 KB push next to a no-op 8 KB one.
+// Flash is the bottleneck it removes, and flash only exists on a push that writes.
+//
+// STILL n=1 ON THE ROW THAT DECIDES IT. Before raising this, alternate two DIFFERENT images so
+// every push writes every sector, and read `OTAB SKIP` on each run to prove it did: a
+// throughput number from this bench is meaningless without the kept/wrote line beside it.
+// UN-PARKED 2026-09-10, and the row above is why: on a push that actually writes flash the
+// 256 KB ring is 5.4x the 8 KB one (12.88 vs 2.37 kB/s). Re-confirmed the same day on a
+// no-PSRAM build of the node, which reports `OTAB RING 8192` and measured 2.22 and 7.44 kB/s
+// on two identical real-write pushes - i.e. the 8 KB path is both slow AND wildly variable.
+// A board without PSRAM still gets RING_CAP_MIN; allocRing() falls back on its own.
+static constexpr size_t RING_CAP_PSRAM = 256 * 1024;
+static size_t ringCap = RING_CAP_MIN;             // set by allocRing(), never read before it runs
 static constexpr size_t FLUSH_SLICE = 2048;       // flash-page-friendly esp_ota_write granularity
-static constexpr size_t CRED_STEP = RING_CAP / 2; // re-grant credit in half-window steps (limits notifies)
+// HOW OFTEN CREDIT IS RE-ANNOUNCED, AND WHY IT IS CAPPED.
+//
+// This was ringCap/2, which is correct at 8 KB (announce every 4 KB) and a DEADLOCK at 256 KB.
+// MEASURED 2026-09-10, first bench run with the PSRAM-sized ring: the host was granted the whole
+// 256 KB up front, wrote exactly 262144 bytes into it in about six seconds, and then had to wait
+// for the next announcement - which needed the consumer to drain 128 KB before it would fire. The
+// device meanwhile saw NO INBOUND BYTES, because the host was correctly obeying its credit, and
+// killed the transfer with `OTAB FAIL stalled` on the 30 s no-bytes watchdog. Host waiting on
+// credit, device waiting on bytes: a deadlock that a small ring hid, because with a 4 KB step
+// credit always advanced long before the watchdog could fire.
+//
+// So the step is capped in ABSOLUTE terms rather than scaled to the window. 16 KB is eight
+// FLUSH_SLICE drains, so credit advances every few consumer ticks no matter how large the ring is,
+// while the notification rate stays far below the 8 KB ring's old one at 4 KB per step.
+static constexpr size_t CRED_STEP_MAX = 16 * 1024;
+static inline size_t credStep() {
+    size_t h = ringCap / 2;
+    return h < CRED_STEP_MAX ? h : CRED_STEP_MAX;
+}
 // Four chances inside the host tools' 20 s credit wait, at only 12 idle notifications per minute.
 static constexpr uint32_t CRED_REPEAT_MS = 5000;
 // Matches the 30 s watchdog already used by the node consumer, now a backstop for every transport.
@@ -115,6 +205,33 @@ static uint32_t secOff = 0;       // slot offset the buffer's first byte belongs
 static uint32_t secFill = 0;
 static uint32_t skSkipped = 0;    // sectors the slot already held
 static uint32_t skWritten = 0;    // sectors erased and reprogrammed
+// Resume. A dropped link costs the whole transfer only because nothing remembers what already
+// reached flash: measured on a farm node 2026-09-10, a 751 744-byte raw push died at 175 104 bytes
+// and the retry started again at zero, on an operation that takes ~108 s and completes about half
+// the time.
+//
+// So remember. On every teardown of a raw session the receiver records the sector-aligned prefix it
+// can PROVE is in the update slot, together with the size and digest of the transfer that put it
+// there; `info` advertises it, and a `resume` command carrying the same three numbers picks the
+// transfer back up at that offset.
+//
+// Three things make that safe, and none of them is the record:
+//   * The record is only a hint about WHERE to restart. What authenticates the result is that a
+//     resumed session re-hashes the prefix OUT OF THE SLOT (see beginWithDigest), so `end` still
+//     checks a SHA-256 over the whole payload -- and over the bytes that will actually boot.
+//   * Only OtaXform::Raw is ever recorded. Under tamp or delta a wire offset is not an image
+//     offset and the transform's own state (window, patch decoder) died with the session, so there
+//     is nothing a byte offset could mean.
+//   * A fresh `begin` clears the record before it touches the slot, so a record never outlives the
+//     flash content it describes within a session.
+// It does NOT survive a reboot: the OTA handle does not, and neither do these.
+static const esp_partition_t *resPart = nullptr;
+static uint32_t resOff = 0;        // sector-aligned wire bytes provably in the slot
+static uint32_t resSize = 0;       // wire size of the transfer that put them there
+static uint8_t resSha[32];         // its digest -- a resume must name the same one
+static bool resValid = false;
+static bool resRecordable = false; // this session may leave a resume point behind
+static uint32_t flushed = 0;       // sector-aligned bytes committed to the slot this session
 static uint32_t staged = 0;     // accepted from the producer; sampled by the stall watchdog
 static uint32_t lastGranted = 0;
 static uint32_t lastProg = 0;
@@ -129,10 +246,11 @@ static OtaBleHooks hooks;
 // Single-slot command latch. The protocol is strictly one command at a time -- the host always waits
 // for a status line before sending the next -- so a second command arriving before the consumer has
 // drained the first is a host bug, and is reported as one rather than silently overwriting.
-enum class PendingCmd { None, Begin, End, Abort, Info };
+enum class PendingCmd { None, Begin, Resume, End, Abort, Info };
 static PendingCmd pending = PendingCmd::None;
 static uint32_t pendSize = 0;
 static uint32_t pendOut = 0;
+static uint32_t pendOff = 0; // Resume only: where the host wants to carry on from
 static OtaXform pendXform = OtaXform::Raw;
 static uint8_t pendSha[32];
 static std::mutex cmdMutex;
@@ -178,8 +296,13 @@ static esp_err_t commitSector() {
     // the first comparison can read it, so sector 0 never matches anyway -- removing the `off != 0`
     // below changes no test outcome. It stays because the invariant it states is local, and the
     // thing that actually enforces it today is the erase size of a call made a hundred lines away.
+    // A whole sector that reaches the slot -- by matching or by being programmed -- is the unit the
+    // resume point is measured in. Recorded only on the success paths, and only for a FULL sector:
+    // secOff above advances before the erase, so it names a sector this call has not committed yet,
+    // and the final partial sector is not a boundary a resumed transfer could restart on.
     if (off != 0 && sectorMatches(off, secBuf, n)) {
         ++skSkipped;
+        if (n == secSize) flushed = off + n;
         return ESP_OK;
     }
     // A partial tail still erases its whole sector: the bytes past the image are not part of it,
@@ -190,7 +313,10 @@ static esp_err_t commitSector() {
     ++erCalls;
     if (err != ESP_OK) return err;
     err = esp_ota_write_with_offset(otaHandle, secBuf, n, off);
-    if (err == ESP_OK) ++skWritten;
+    if (err == ESP_OK) {
+        ++skWritten;
+        if (n == secSize) flushed = off + n;
+    }
     return err;
 }
 
@@ -279,11 +405,11 @@ static void freeRing() {
 }
 
 static void grantCredit() {
-    // High-water mark: the host may stream up to (written + RING_CAP) cumulative bytes. Advance it as
-    // flash drains; announce advances only in CRED_STEP jumps, while repeatCredit recovers a lost one.
-    uint32_t g = written + RING_CAP;
+    // High-water mark: the host may stream up to (written + ringCap) cumulative bytes. Advance it as
+    // flash drains; announce advances only in credStep() jumps, while repeatCredit recovers a lost one.
+    uint32_t g = written + ringCap;
     if (g > expectedSize) g = expectedSize;
-    if (g > lastGranted && (g >= lastGranted + CRED_STEP || g == expectedSize)) {
+    if (g > lastGranted && (g >= lastGranted + credStep() || g == expectedSize)) {
         lastGranted = g;
         emit(OtaBleLevel::Info, "OTAB CRED %u", (unsigned) g);
         creditRepeatArmed = false;
@@ -299,6 +425,48 @@ static void repeatCredit(uint32_t nowMs) {
     if (nowMs - creditRepeatAt < CRED_REPEAT_MS) return;
     creditRepeatAt = nowMs;
     emit(OtaBleLevel::Info, "OTAB CRED %u", (unsigned) lastGranted);
+}
+
+/// Consumer only. How many wire bytes of the current session this module is willing to swear are
+/// in the update slot, rounded down to an erase sector.
+///
+/// Rounding down is not caution about flash: esp_ota_write buffers a partial trailing chunk of its
+/// own under flash encryption, and a resumed transfer has to restart on a boundary it may erase.
+/// Every byte above the returned offset is re-sent, which costs link time and nothing else; a byte
+/// wrongly claimed below it would be spliced into the image unread. Only one of those is recoverable.
+static uint32_t durablePrefix() {
+    if (xform != OtaXform::Raw) return 0; // a wire offset is not an image offset under a transform
+    if (!otaPart) return 0;
+    const uint32_t esz = (uint32_t) otaPart->erase_size;
+    if (!esz) return 0;
+    // With the sector path this is exactly what commitSector reported; otherwise esp_ota_write owns
+    // the slot and imageWritten is what it was handed, so floor it.
+    const uint32_t off = secSize ? flushed : (imageWritten / esz) * esz;
+    if (off < esz) return 0;
+    // Leave the host at least one sector to send. A resume that has nothing left to stream never
+    // drains the ring, so the receiver never emits the final PROG the host waits for before `end`.
+    if (off >= expectedSize) return expectedSize > esz ? ((expectedSize - 1) / esz) * esz : 0;
+    return off;
+}
+
+/// Consumer only. Remember where an interrupted transfer got to, so the next one can carry on.
+/// Called on teardown; anything it cannot establish leaves no record at all, because a record is a
+/// promise about flash and a wrong one costs a whole transfer to discover.
+static void recordResumePoint() {
+    resValid = false;
+    if (!resRecordable) return;
+    if (xform != OtaXform::Raw) return;
+    // esp_ota_write_with_offset refuses any size that is not a multiple of 16 under encryption, and
+    // the resumed session writes through nothing else. Refusing here rather than at resume time
+    // means the host is never offered a restart the receiver could not honour.
+    if (esp_flash_encryption_enabled()) return;
+    const uint32_t off = durablePrefix();
+    if (!off) return;
+    resPart = otaPart;
+    resOff = off;
+    resSize = expectedSize;
+    memcpy(resSha, expectedSha, 32);
+    resValid = true;
 }
 
 /// Consumer task. Answer "what are you running, and what can you accept?" -- everything a host
@@ -323,6 +491,17 @@ static void reportInfo() {
         emit(OtaBleLevel::Warn, "OTAB BASE none");
     }
 
+    // Before XFORM, which the host tools treat as the last line of the reply. It is also the whole
+    // capability negotiation: a receiver that predates resume emits no RESUME line, and a host that
+    // sees none does a fresh push -- exactly what it did before this existed. `none` is deliberately
+    // NOT silence: "I can resume but have nothing" and "I have never heard of resume" are different
+    // facts about the device, and only the first one is worth retrying against.
+    if (resValid && resPart && resPart == next) {
+        emit(OtaBleLevel::Info, "OTAB RESUME %u %u", (unsigned) resOff, (unsigned) resSize);
+    } else {
+        emit(OtaBleLevel::Info, "OTAB RESUME none");
+    }
+
     char list[48];
     int n = snprintf(list, sizeof(list), "raw");
     if (otaXformAvailable(OtaXform::Tamp)) n += snprintf(list + n, sizeof(list) - n, ",tamp");
@@ -330,12 +509,28 @@ static void reportInfo() {
     emit(OtaBleLevel::Info, "OTAB XFORM %s", list);
 }
 
-void otaBleInit(const OtaBleHooks &h) { hooks = h; }
+void otaBleInit(const OtaBleHooks &h) {
+    hooks = h;
+    // A resume point is a claim about what is in the update slot right now. Init means the start of
+    // the world -- either a boot, where the claim died with the session that made it, or a consumer
+    // re-initialising, where this module has no idea what happened in between. Neither is a state
+    // in which an old claim is worth keeping.
+    resValid = false;
+    resRecordable = false;
+}
 
 bool otaBleActive() { return active; }
 
-static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, uint32_t outSize) {
+/// `resumeFrom` is 0 for a fresh transfer, or the wire offset a previously interrupted transfer of
+/// exactly this size and digest is to be continued from. Resume is raw-only and the caller has
+/// already checked the offset against the recorded one; see recordResumePoint().
+static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, uint32_t outSize,
+                            uint32_t resumeFrom = 0) {
     if (active) { emit(OtaBleLevel::Warn, "OTAB FAIL already-active"); return false; }
+    // Whichever way this goes, the recorded prefix stops describing the slot the moment anything
+    // below erases it -- and a resume consumes its own record. Drop it here, before any of that.
+    resValid = false;
+    resRecordable = false;
     otaPart = esp_ota_get_next_update_partition(nullptr);
     if (!otaPart) { emit(OtaBleLevel::Warn, "OTAB FAIL no-partition"); return false; }
     // The IMAGE has to fit the slot; that is the only size bound worth enforcing here. The wire
@@ -348,9 +543,22 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, ui
         return false;
     }
     if (size == 0) { emit(OtaBleLevel::Warn, "OTAB FAIL bad-size"); return false; }
-    ring = (uint8_t *) heap_caps_malloc(RING_CAP, MALLOC_CAP_SPIRAM);
-    if (!ring) ring = (uint8_t *) heap_caps_malloc(RING_CAP, MALLOC_CAP_DEFAULT); // PSRAM-less fallback
+    // PSRAM first and BIG; internal memory second and small. The fallback is the old behaviour
+    // exactly, so a no-PSRAM board is unaffected. ringCap is set from what was actually obtained -
+    // never from what was asked for, or a failed large allocation would leave the modulo arithmetic
+    // below indexing past the buffer.
+    ringCap = RING_CAP_PSRAM;
+    ring = (uint8_t *) heap_caps_malloc(ringCap, MALLOC_CAP_SPIRAM);
+    if (!ring) {
+        ringCap = RING_CAP_MIN;
+        ring = (uint8_t *) heap_caps_malloc(ringCap, MALLOC_CAP_SPIRAM);
+    }
+    if (!ring) {
+        ringCap = RING_CAP_MIN;
+        ring = (uint8_t *) heap_caps_malloc(ringCap, MALLOC_CAP_DEFAULT); // PSRAM-less fallback
+    }
     if (!ring) { emit(OtaBleLevel::Warn, "OTAB FAIL no-mem"); return false; }
+    emit(OtaBleLevel::Info, "OTAB RING %u", (unsigned) ringCap);
 
     memcpy(expectedSha, sha, 32);
     quiesce(true); // free the CPU/flash for the erase + writes before anything touches the partition
@@ -376,7 +584,59 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, ui
     otaHandle = 0;
     erasedTo = eraseTarget = 0;
     skSkipped = skWritten = 0;
-    [[maybe_unused]] const uint32_t esz = (uint32_t) otaPart->erase_size;
+    const uint32_t esz = (uint32_t) otaPart->erase_size;
+
+    if (resumeFrom) {
+        // Resume owns the slot through the sector path whether or not skip-identical is this
+        // build's default strategy. That is not a preference: esp_ota_write_with_offset is the only
+        // writer here that can start anywhere but zero, and it never erases for you, so the
+        // per-sector erase+program in commitSector is the only thing that can put the tail down.
+        // The sector buffer is therefore mandatory, not an optimisation, and its absence refuses
+        // the resume rather than failing the push -- the host still has a fresh `begin`.
+        if (esz < CMP_WINDOW || esz > 8192) {
+            emit(OtaBleLevel::Warn, "OTAB FAIL resume-sector");
+            freeRing();
+            quiesce(false);
+            return false;
+        }
+        secBuf = (uint8_t *) heap_caps_malloc(esz, MALLOC_CAP_SPIRAM);
+        if (!secBuf) secBuf = (uint8_t *) heap_caps_malloc(esz, MALLOC_CAP_DEFAULT);
+        if (!secBuf) {
+            emit(OtaBleLevel::Warn, "OTAB FAIL resume-no-mem");
+            freeRing();
+            quiesce(false);
+            return false;
+        }
+        // Sector 0 has to be rescued BEFORE esp_ota_begin. One sector is the smallest erase that
+        // still leaves need_erase == false -- which is what hands this module every later erase --
+        // and that sector is the head of the prefix we are resuming on top of. Read it out, let
+        // begin erase it, put it straight back. The rewrite is not only about the bytes: esp_ota_end
+        // refuses a handle nothing was ever written through, and a resume near the end of an image
+        // may otherwise write very little.
+        if (esp_partition_read(otaPart, 0, secBuf, esz) != ESP_OK) {
+            emit(OtaBleLevel::Warn, "OTAB FAIL resume-read");
+            freeRing();
+            quiesce(false);
+            return false;
+        }
+        esp_err_t rerr = esp_ota_begin(otaPart, esz, &otaHandle);
+        if (rerr != ESP_OK) {
+            emit(OtaBleLevel::Warn, "OTAB FAIL esp_ota_begin %s", esp_err_to_name(rerr));
+            if (otaHandle) { esp_ota_abort(otaHandle); otaHandle = 0; }
+            freeRing();
+            quiesce(false);
+            return false;
+        }
+        rerr = esp_ota_write_with_offset(otaHandle, secBuf, esz, 0);
+        if (rerr != ESP_OK) {
+            emit(OtaBleLevel::Warn, "OTAB FAIL resume-write %s", esp_err_to_name(rerr));
+            esp_ota_abort(otaHandle);
+            otaHandle = 0;
+            freeRing();
+            quiesce(false);
+            return false;
+        }
+    } else {
 
     // Strategy, first refusal to skip-identical-sectors. It subsumes the other two: it removes
     // flash work rather than rescheduling it, and it does so under every transform, because it
@@ -452,6 +712,7 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, ui
         quiesce(false);
         return false;
     }
+    } // end of the fresh-transfer strategy selection; a resume opened its own handle above
     // A delta patch names the base it was built against. Hash the running image now so the
     // transform can reject a patch aimed at a different one -- the digest is over 1.7 MB of flash,
     // but it is read once per session and only when a delta actually asked for it.
@@ -483,12 +744,56 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, ui
 
     mbedtls_sha256_init(&shaCtx);
     mbedtls_sha256_starts(&shaCtx, 0); // 0 = SHA-256
+    if (resumeFrom) {
+        // THE DIGEST DECISION, and the whole reason a resume is safe.
+        //
+        // `end` verifies a SHA-256 over the entire wire payload, and the prefix that already
+        // reached flash was hashed by a session that no longer exists. There are two ways to keep
+        // that check honest: carry the hash state across the drop, or recompute it. This recomputes
+        // it, by READING THE PREFIX BACK OUT OF THE UPDATE SLOT -- which is strictly the stronger
+        // of the two, because the bytes in the slot are the bytes that will boot. A carried-over
+        // hash state would only re-prove what the link delivered into RAM last time and would say
+        // nothing about what survived in flash.
+        //
+        // What this buys, concretely: a resume onto a slot holding a prefix of some OTHER build, a
+        // slot clobbered in between, a wrong offset, or a truncated write all end at `end` with
+        // OTAB FAIL sha-mismatch, an abort, and a boot partition that never moved. Resume cannot
+        // splice two images together; the worst it can do is waste a transfer.
+        //
+        // Raw only, so the wire prefix and the slot prefix are the same bytes. Sector 0 comes from
+        // the buffer because esp_ota_begin has already erased it in flash.
+        mbedtls_sha256_update(&shaCtx, secBuf, esz);
+        bool readErr = false;
+        for (uint32_t o = esz; o < resumeFrom;) {
+            const uint32_t n = std::min<uint32_t>(esz, resumeFrom - o);
+            if (esp_partition_read(otaPart, o, secBuf, n) != ESP_OK) { readErr = true; break; }
+            mbedtls_sha256_update(&shaCtx, secBuf, n);
+            o += n;
+        }
+        if (readErr) {
+            // Unreadable slot: there is no prefix to build on, so there is no resume. Not a
+            // downgrade to "hash what we can" -- an unevaluable check is never permission.
+            emit(OtaBleLevel::Warn, "OTAB FAIL resume-read");
+            mbedtls_sha256_free(&shaCtx);
+            otaXformEnd();
+            esp_ota_abort(otaHandle);
+            otaHandle = 0;
+            freeRing();
+            quiesce(false);
+            return false;
+        }
+        secSize = esz; // arms the sector path in xformSink, whatever the build default is
+        secOff = resumeFrom;
+        secFill = 0;
+    }
     rHead = rTail = rCount = 0;
     xform = x;
     expectedSize = size;
     expectedOut = outSize;
-    imageWritten = 0;
-    written = staged = lastGranted = lastProg = 0;
+    imageWritten = resumeFrom;
+    written = resumeFrom;
+    flushed = resumeFrom;
+    staged = lastGranted = lastProg = 0;
     sinkFailed = false;
     wrUs = 0; wrCalls = wrSlowCalls = wrMaxUs = 0;
     erUs = erCalls = 0;
@@ -497,10 +802,36 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, ui
     creditRepeatArmed = false;
     stallArmed = false;
     active = true;
-    emit(OtaBleLevel::Info, "OTAB READY part=%s size=%u xform=%s out=%u",
-         otaPart->label, (unsigned) size, otaXformName(x), (unsigned) outSize);
+    resRecordable = true;
+    // READY stays byte-for-byte what it was for a fresh transfer; a resumed one appends where it
+    // picked up. Every host matches on the prefix, so the extra field costs nothing and a log that
+    // does not say "from=" is a transfer that really did start at zero.
+    if (resumeFrom) {
+        emit(OtaBleLevel::Info, "OTAB READY part=%s size=%u xform=%s out=%u from=%u",
+             otaPart->label, (unsigned) size, otaXformName(x), (unsigned) outSize,
+             (unsigned) resumeFrom);
+    } else {
+        emit(OtaBleLevel::Info, "OTAB READY part=%s size=%u xform=%s out=%u",
+             otaPart->label, (unsigned) size, otaXformName(x), (unsigned) outSize);
+    }
     grantCredit();
     return true;
+}
+
+bool otaBleResume(uint32_t offset, uint32_t size, const char *sha256hex) {
+    uint8_t sha[32];
+    if (!sha256hex || strlen(sha256hex) != 64 || parseHex32(sha256hex, sha) != 0) {
+        emit(OtaBleLevel::Warn, "OTAB FAIL bad-sha");
+        return false;
+    }
+    // The offset is the receiver's own number, echoed back. Accepting the host's instead would let
+    // a stale tool restart at an offset nothing ever wrote.
+    if (!resValid || offset != resOff || size != resSize || memcmp(sha, resSha, 32) != 0 ||
+        resPart != esp_ota_get_next_update_partition(nullptr)) {
+        emit(OtaBleLevel::Warn, "OTAB FAIL resume-mismatch");
+        return false;
+    }
+    return beginWithDigest(size, sha, OtaXform::Raw, size, offset);
 }
 
 bool otaBleBegin(uint32_t size, const char *sha256hex, const char *xformName, uint32_t outSize) {
@@ -521,14 +852,14 @@ void otaBleStageBytes(const uint8_t *data, size_t len) {
     if (!len) return;
     std::lock_guard<std::mutex> lk(ringMutex);
     if (!active || failed || !ring) return; // re-check under lock: consumer teardown frees ring here too
-    if (len > RING_CAP - rCount) { // host overran its credit window -- consumer reports + aborts
+    if (len > ringCap - rCount) { // host overran its credit window -- consumer reports + aborts
         failed = true;
         return;
     }
-    size_t first = std::min(len, RING_CAP - rHead);
+    size_t first = std::min(len, ringCap - rHead);
     memcpy(ring + rHead, data, first);
     if (len > first) memcpy(ring, data + first, len - first);
-    rHead = (rHead + len) % RING_CAP;
+    rHead = (rHead + len) % ringCap;
     rCount += len;
     staged += len;
 }
@@ -549,13 +880,35 @@ static bool abortIfOverrun() {
 
 static bool abortIfStalled(uint32_t nowMs) {
     uint32_t stagedNow;
+    size_t   countNow;
     {
         std::lock_guard<std::mutex> lk(ringMutex);
         if (!active) return false;
         stagedNow = staged;
+        countNow  = rCount;
     }
-    if (!stallArmed || stagedNow != stallMark) {
-        stallMark = stagedNow;
+    /* PROGRESS IS EITHER SIDE MOVING, NOT JUST BYTES ARRIVING.
+     *
+     * This watched `staged` alone - bytes the producer has taken from the link.
+     * That is the right measure for a peer that vanished mid-transfer, and the
+     * wrong one at the END of a healthy transfer: once the host has sent the
+     * last byte there is nothing left to arrive, `staged` stops by definition,
+     * and the consumer still has a whole ring to drain to flash. The watchdog
+     * then killed a transfer that was progressing normally.
+     *
+     * MEASURED 2026-09-10, bench board with the 256 KB PSRAM ring: all 711 904
+     * bytes reached the device (elapsed 109 s, 6.38 kB/s, first quarter
+     * 28.27 kB/s) and the push still ended `OTAB FAIL stalled`, because
+     * draining the tail of a large ring takes longer than STALL_MS with no
+     * inbound bytes to refresh the mark. An 8 KB ring hid this: its tail drains
+     * in milliseconds.
+     *
+     * So the mark is staged AND written. Either advancing means the transfer is
+     * alive; only both stopping for STALL_MS is a real stall - which is exactly
+     * what a vanished peer looks like, so the original purpose is preserved. */
+    const uint32_t progressNow = stagedNow + written;
+    if (!stallArmed || progressNow != stallMark) {
+        stallMark = progressNow;
         stallAt = nowMs;
         stallArmed = true;
         return false;
@@ -563,7 +916,12 @@ static bool abortIfStalled(uint32_t nowMs) {
     if (nowMs - stallAt < STALL_MS) return false;
     // A disappeared peer cannot finish an open handle. Bounding this state also bounds how long a
     // consumer's quiesce hook can leave its sampler or power stage halted after a missed disconnect.
-    emit(OtaBleLevel::Warn, "OTAB FAIL stalled");
+    // The counts are the whole diagnosis of a stall, and guessing them from PROG is how the
+    // 256 KB ring got mis-blamed on the drain path: `staged` short of the size the host says it
+    // sent means the LINK dropped writes, while staged == size with rCount > 0 means the consumer
+    // really is not draining. One line settles which, months later, from a log.
+    emit(OtaBleLevel::Warn, "OTAB FAIL stalled staged=%u written=%u ring=%u/%u",
+         (unsigned) stagedNow, (unsigned) written, (unsigned) countNow, (unsigned) ringCap);
     otaBleAbort();
     return true;
 }
@@ -597,10 +955,10 @@ static bool drainRing() {
             std::lock_guard<std::mutex> lk(ringMutex);
             n = std::min(rCount, (size_t) FLUSH_SLICE);
             if (n == 0) break;
-            size_t first = std::min(n, RING_CAP - rTail);
+            size_t first = std::min(n, ringCap - rTail);
             memcpy(slice, ring + rTail, first);
             if (n > first) memcpy(slice + first, ring, n - first);
-            rTail = (rTail + n) % RING_CAP;
+            rTail = (rTail + n) % ringCap;
             rCount -= n;
         }
         // Transform + flash write happen outside the lock so the producer's stage call never blocks
@@ -645,7 +1003,7 @@ void otaBleTick(uint32_t nowMs) {
     // Latched commands run here, never on the producer task: begin and end block on flash for far
     // longer than a BLE host callback may.
     PendingCmd cmd;
-    uint32_t size, outSize;
+    uint32_t size, outSize, off;
     OtaXform x;
     uint8_t sha[32];
     {
@@ -653,12 +1011,21 @@ void otaBleTick(uint32_t nowMs) {
         cmd = pending;
         size = pendSize;
         outSize = pendOut;
+        off = pendOff;
         x = pendXform;
         memcpy(sha, pendSha, 32);
     }
     if (cmd != PendingCmd::None) {
         switch (cmd) {
             case PendingCmd::Begin: beginWithDigest(size, sha, x, outSize); break;
+            // Re-checked inside, not merely at submit: the record could have been dropped by
+            // anything that ran between the two, and the offset decides where bytes land.
+            case PendingCmd::Resume: {
+                char hex[65];
+                for (int i = 0; i < 32; ++i) snprintf(hex + i * 2, 3, "%02x", sha[i]);
+                otaBleResume(off, size, hex);
+                break;
+            }
             case PendingCmd::End:   otaBleEnd(); break; // reboots and does not return, on success
             case PendingCmd::Abort: otaBleAbort(); break;
             case PendingCmd::Info:  reportInfo(); break;
@@ -671,7 +1038,8 @@ void otaBleTick(uint32_t nowMs) {
             // however, replace Begin with Abort while the slow begin is executing; honour it after
             // begin returns rather than letting beginWithDigest's stale-abort reset erase it.
             std::lock_guard<std::mutex> lk(cmdMutex);
-            cancelStartedBegin = cmd == PendingCmd::Begin && pending == PendingCmd::Abort;
+            cancelStartedBegin = (cmd == PendingCmd::Begin || cmd == PendingCmd::Resume) &&
+                                 pending == PendingCmd::Abort;
             pending = PendingCmd::None;
         }
         if (cancelStartedBegin && active) { otaBleAbort(); return; }
@@ -705,6 +1073,11 @@ bool otaBleEnd() {
     if (!drainRing()) return false; // drain whatever is still staged; false = aborted on a write error
     if (abortIfOverrun()) return false;
 
+    // Past this point the transfer is complete as far as the host is concerned, and every remaining
+    // exit is a verdict on the whole payload -- too short, wrong digest, unreconstructable, refused
+    // by esp_ota_end. None of those is a link problem, so none of them leaves a resume point: a
+    // host that retried onto one would spend a full transfer rediscovering the same verdict.
+    resRecordable = false;
     if (written != expectedSize) {
         emit(OtaBleLevel::Warn, "OTAB FAIL incomplete %u/%u", (unsigned) written, (unsigned) expectedSize);
         otaBleAbort();
@@ -783,7 +1156,7 @@ void otaBleRequestAbort() {
     // otaBleTick catches the replacement without holding cmdMutex across flash work.
     {
         std::lock_guard<std::mutex> lk(cmdMutex);
-        if (pending == PendingCmd::Begin) {
+        if (pending == PendingCmd::Begin || pending == PendingCmd::Resume) {
             pending = PendingCmd::Abort;
             return;
         }
@@ -796,6 +1169,10 @@ void otaBleRequestAbort() {
 
 void otaBleAbort() {
     if (!active) return;
+    // Before freeRing(), which clears the sector bookkeeping this reads. An abort is the ONLY place
+    // a resume point is born: a transfer that reached `end` either installed or was rejected, and
+    // neither leaves a prefix worth continuing.
+    recordResumePoint();
     { std::lock_guard<std::mutex> lk(ringMutex); active = false; freeRing(); }
     otaXformEnd();
     if (otaHandle) { esp_ota_abort(otaHandle); otaHandle = 0; }
@@ -820,7 +1197,7 @@ OtaBleSubmit otaBleSubmitCommand(const char *line) {
     while (*line == ' ') ++line;
 
     PendingCmd cmd;
-    uint32_t size = 0, outSize = 0;
+    uint32_t size = 0, outSize = 0, off = 0;
     OtaXform x = OtaXform::Raw;
     uint8_t sha[32];
 
@@ -860,6 +1237,34 @@ OtaBleSubmit otaBleSubmitCommand(const char *line) {
         }
         size = (uint32_t) parsedSize;
         cmd = PendingCmd::Begin;
+    } else if (strncmp(line, "resume", 6) == 0 && (line[6] == ' ' || line[6] == '\0')) {
+        // "resume <wireOffset> <wireSize> <wireSha256hex>" -- carry on an interrupted RAW transfer.
+        // A separate verb rather than a fifth field on `begin`, so `begin` stays byte-for-byte the
+        // command every existing receiver and host already agree on.
+        //
+        // All three numbers must match what this receiver recorded, and the offset is its own
+        // number echoed back rather than a position the host chose. That is deliberately stricter
+        // than it needs to be: the digest check at `end` would catch a wrong resume anyway, but
+        // only after spending the entire transfer to find out.
+        const char *p = line + 6;
+        char shaHex[80], extra[8];
+        unsigned long parsedOff = 0, parsedSize = 0;
+        const int fields = sscanf(p, " %lu %lu %79s %7s", &parsedOff, &parsedSize, shaHex, extra);
+        if (fields != 3) return reject("bad-command");
+        if (parsedOff == 0 || parsedOff > UINT32_MAX) return reject("bad-size");
+        if (parsedSize == 0 || parsedSize > UINT32_MAX) return reject("bad-size");
+        if (strlen(shaHex) != 64 || parseHex32(shaHex, sha) != 0) return reject("bad-sha");
+        // Answered synchronously, because the host's next move on a refusal is a fresh `begin` and
+        // it should not have to wait out a READY timeout to learn that.
+        if (!resValid) return reject("resume-none");
+        if (resPart != esp_ota_get_next_update_partition(nullptr)) return reject("resume-none");
+        if ((uint32_t) parsedOff != resOff || (uint32_t) parsedSize != resSize ||
+            memcmp(sha, resSha, 32) != 0)
+            return reject("resume-mismatch");
+        size = (uint32_t) parsedSize;
+        outSize = size;
+        off = (uint32_t) parsedOff;
+        cmd = PendingCmd::Resume;
     } else if (strncmp(line, "info", 4) == 0 && (line[4] == ' ' || line[4] == '\0' ||
                                                  line[4] == '\r' || line[4] == '\n')) {
         cmd = PendingCmd::Info;
@@ -878,7 +1283,8 @@ OtaBleSubmit otaBleSubmitCommand(const char *line) {
     pending = cmd;
     pendSize = size;
     pendOut = outSize;
+    pendOff = off;
     pendXform = x;
-    if (cmd == PendingCmd::Begin) memcpy(pendSha, sha, 32);
+    if (cmd == PendingCmd::Begin || cmd == PendingCmd::Resume) memcpy(pendSha, sha, 32);
     return OtaBleSubmit::Accepted;
 }

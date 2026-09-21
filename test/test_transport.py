@@ -109,21 +109,67 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         link.disconnected.set()
         with self.assertRaises(O.OtaBleError): await link.write_fw(b'a')
 
-    async def test_capacity_missing_bad_and_exceeded_never_write(self):
-        for capacity in (None, 0, -1, 513, 1000000, True, '244'):
-            link = self.link()
-            char = NS(properties=['write-without-response'], max_write_without_response_size=capacity)
-            link._cli.services = NS(get_characteristic=lambda _: char)
-            with self.subTest(capacity=capacity), self.assertRaises(O.OtaBleError):
-                await link._configure_capacity()
-            link._cli.write_gatt_char.assert_not_awaited()
-        link = self.link(chunk=495)
-        char.max_write_without_response_size = 244
+    async def configure_with(self, capacity, *, bluez=True, mtu=23, acquired=False, **options):
+        """_configure_capacity() against a characteristic reporting `capacity`."""
+        notes = []
+        link = self.link(**options)
+        link.note = notes.append
+        link._capacity = 0
+        link.mtu = mtu
+        link._mtu_acquired = acquired
+        if acquired:
+            link._mtu_status = 'acquired (MTU %d)' % mtu
+        char = NS(properties=['write-without-response'], max_write_without_response_size=capacity)
         link._cli.services = NS(get_characteristic=lambda _: char)
-        with self.assertRaises(O.OtaBleError): await link._configure_capacity()
-        for data in (b'', b'x'*496, b'x'*100000):
+        with patch.object(T.sys, 'platform', 'linux' if bluez else 'darwin'):
+            await link._configure_capacity()
+        return link, ' '.join(notes)
+
+    async def test_unreportable_capacity_degrades_to_the_safe_minimum_and_says_so(self):
+        # bleak can hand back anything here: getattr()'s default also absorbs an
+        # AttributeError raised inside the backend's property.
+        for capacity in (None, 0, -1, True, '244', object()):
+            with self.subTest(capacity=capacity):
+                link, notes = await self.configure_with(capacity)
+                self.assertEqual((link._capacity, link.chunk), (O.SAFE_MIN_FW_WRITE, 20))
+                self.assertIn('FALLING BACK', notes)
+                self.assertIn('not attempted', notes)
+                await link.write_fw(b'x' * 20)
+                with self.assertRaises(O.OtaBleError): await link.write_fw(b'x' * 21)
+
+    async def test_bleak3_bluez_reports_mtu_minus_3_above_the_att_maximum(self):
+        # bleak 3.x/BlueZ 5.62+ computes this live as char MTU - 3, so a link at
+        # the maximal ATT MTU of 517 reports 514 -- above the 512 an ATT value
+        # can hold, and exactly the size that silently corrupted an image.
+        link, notes = await self.configure_with(514)
+        self.assertEqual((link._capacity, link.chunk), (O.BLUEZ_MAX_FW_WRITE, 244))
+        self.assertIn('CLAMPED', notes)
+        link, _ = await self.configure_with(514, bluez=False)
+        self.assertEqual((link._capacity, link.chunk), (512, 244))
+
+    async def test_plain_report_is_used_and_an_oversized_override_still_refuses(self):
+        link, notes = await self.configure_with(244)
+        self.assertEqual((link._capacity, link.chunk), (244, 244))
+        self.assertIn('backend reported 244', notes)
+        await link.write_fw(b'x' * 244)
+        with self.assertRaises(O.OtaBleError): await link.write_fw(b'x' * 245)
+        with self.assertRaises(O.OtaBleError): await self.configure_with(244, chunk=495)
+        link = self.link(chunk=495)
+        link._capacity = 0
+        for data in (b'', b'x' * 496, b'x' * 100000):
             with self.assertRaises(O.OtaBleError): await link.write_fw(data)
         link._cli.write_gatt_char.assert_not_awaited()
+
+    async def test_acquired_mtu_rescues_a_stale_or_absent_report(self):
+        for capacity in (20, None):
+            with self.subTest(capacity=capacity):
+                link, notes = await self.configure_with(capacity, mtu=517, acquired=True)
+                self.assertEqual((link._capacity, link.chunk), (O.BLUEZ_MAX_FW_WRITE, 244))
+                self.assertIn('acquired MTU 517', notes)
+                self.assertIn('acquired (MTU 517)', notes)
+        # A real 20 on a link nobody acquired is authoritative, not stale.
+        link, _ = await self.configure_with(20, bluez=False)
+        self.assertEqual(link._capacity, 20)
 
     async def test_corebluetooth_unwritable_is_failure(self):
         link = self.link()

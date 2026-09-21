@@ -34,15 +34,21 @@ import platform
 import re
 import struct
 import subprocess
+import sys
 import tempfile
+import time
 
 __all__ = [
     "OtaBleError", "find_device", "BleOtaLink", "adapt_link", "usable_chunk",
-    "acquire_bluez_mtu",
-    "push_image", "query_info",
+    "acquire_bluez_mtu", "acquire_bluez_mtu_status", "resolve_write_capacity",
+    "SAFE_MIN_FW_WRITE", "BLUEZ_MAX_FW_WRITE",
+    "push_image", "query_info", "resume_offset", "image_is_running",
+    "OtaLink", "require_link",
     "image_id", "build_tamp_payload", "build_delta_payload", "choose_payload",
     "image_cache_dir", "cache_image", "cached_image",
+    "read_local_app_desc", "image_keeps_the_push_path", "progress_bar",
     "TAMP_WINDOW_BITS", "DELTA_MAGIC", "DELTA_HEADER_SIZE",
+    "APP_DESC_MAGIC", "OTAB_RECEIVER_MARKERS",
 ]
 
 # The receiver's own status vocabulary (src/ota_ble.cpp).
@@ -52,6 +58,9 @@ _RE_PROG = re.compile(r"OTAB PROG (\d+)/(\d+)")
 _RE_INFO = re.compile(r"OTAB INFO run=(\S+) slot=(\d+)")
 _RE_BASE = re.compile(r"OTAB BASE ([0-9a-fA-F]{64}|none)")
 _RE_XFORM = re.compile(r"OTAB XFORM (\S+)")
+# "OTAB RESUME <wireOffset> <wireSize>" or "OTAB RESUME none". A receiver too old for resume emits
+# neither, and that absence is the capability test -- see resume_offset().
+_RE_RESUME = re.compile(r"OTAB RESUME (?:(\d+) (\d+)|none)")
 
 _MACOS = platform.system() == "Darwin"
 
@@ -66,6 +75,12 @@ BLUEZ_MAX_FW_WRITE = 400
 # The mandatory ATT default. bleak's BlueZ backend reports exactly this until the
 # real MTU is acquired, so it doubles as the sentinel for "nobody has asked yet".
 _ATT_DEFAULT_MTU = 23
+
+# What one write carries on a link of exactly _ATT_DEFAULT_MTU: the floor every
+# backend can do, and the size the older tools wrote on BlueZ without ever
+# corrupting an image (1.76 MB in 6m33s from a Pi, 2026-09-08). It is the value
+# to degrade TO when a backend cannot say what it can carry -- slow, not wrong.
+SAFE_MIN_FW_WRITE = _ATT_DEFAULT_MTU - 3
 
 
 class OtaBleError(Exception):
@@ -156,14 +171,88 @@ async def acquire_bluez_mtu(client):
     MTU that is already known, or a failure all leave the caller exactly where it
     was — on the slow but never-corrupting 20-byte path.
     """
+    acquired, _ = await acquire_bluez_mtu_status(client)
+    return acquired
+
+
+async def acquire_bluez_mtu_status(client):
+    """acquire_bluez_mtu() plus the one-line reason, as `(acquired, reason)`.
+
+    The bool alone cannot tell an operator whether the backend has no
+    `_acquire_mtu` at all (CoreBluetooth, Bumble), whether AcquireWrite was
+    attempted and raised, or whether it returned and BlueZ still reports 23.
+    Those three land on the same slow path but are different faults, and the
+    capacity line prints which one happened.
+    """
     acquire = getattr(getattr(client, "_backend", None), "_acquire_mtu", None)
-    if acquire is None or client.mtu_size > _ATT_DEFAULT_MTU:
-        return False
+    if acquire is None:
+        return False, "not attempted (backend has no _acquire_mtu)"
+    if client.mtu_size > _ATT_DEFAULT_MTU:
+        return False, "not needed (backend already reports MTU %d)" % client.mtu_size
     try:
         await acquire()
-    except Exception:
-        return False
-    return client.mtu_size > _ATT_DEFAULT_MTU
+    except Exception as exc:
+        return False, "attempted and FAILED (%s: %s)" % (type(exc).__name__, exc)
+    if client.mtu_size > _ATT_DEFAULT_MTU:
+        return True, "acquired (MTU %d)" % client.mtu_size
+    return False, "attempted but MTU still %d" % client.mtu_size
+
+
+def resolve_write_capacity(reported, mtu, *, mtu_acquired=False, backend_is_bluez=None):
+    """Decide the firmware write capacity, as `(capacity, reason)`. Never raises.
+
+    `reported` is the characteristic's `max_write_without_response_size` as the
+    backend gave it — an int, or anything at all when the backend cannot say.
+
+    EVERY branch here narrows. A backend that cannot report a capacity gets
+    SAFE_MIN_FW_WRITE, the slow-but-never-corrupting 20-byte path the older
+    tools used; a backend that reports more than this host is willing to write
+    is clamped down to that limit. Nothing unreportable ever becomes a large
+    write, which is the whole point: the failure mode this module exists to
+    prevent is writing MORE than the link carries, and it is silent.
+
+    Why clamping rather than refusing (changed 2026-09-21): bleak 3.x's BlueZ
+    backend computes this value live as `char_props["MTU"] - 3` (bleak 3.0.2
+    backends/bluezdbus/manager.py:162, evaluated through the callable held by
+    backends/characteristic.py:126). On a link that negotiates the maximal ATT
+    MTU of 517 that is 514 — three bytes above the 512-byte maximum an ATT
+    attribute value can hold, so a plain range check rejects a perfectly normal
+    ESP32 link and blocks the push. 514 is also exactly the number that
+    silently corrupted an image (see usable_chunk), so it is clamped, never
+    trusted: on BlueZ down to BLUEZ_MAX_FW_WRITE, which is measured.
+    """
+    limit = 512
+    if backend_is_bluez is None:
+        backend_is_bluez = not _MACOS
+    if backend_is_bluez:
+        limit = min(limit, BLUEZ_MAX_FW_WRITE)
+
+    # bool is an int subclass and is never a capacity; a str is not one either.
+    usable = type(reported) is int and reported >= 1
+    derived = min(limit, int(mtu) - 3) if mtu_acquired and mtu > _ATT_DEFAULT_MTU else None
+
+    if usable and reported == SAFE_MIN_FW_WRITE and derived is not None:
+        # The documented BlueZ staleness case: the characteristic still says 20
+        # on a link whose MTU we have since made the backend report.
+        capacity, reason = derived, ("backend still reports the stale %d-byte default; using %d "
+                                     "derived from the acquired MTU %d"
+                                     % (SAFE_MIN_FW_WRITE, derived, mtu))
+    elif usable and reported > limit:
+        capacity, reason = limit, ("backend reported %d, above the %d this host will write; "
+                                   "CLAMPED to %d" % (reported, limit, limit))
+    elif usable:
+        capacity, reason = reported, "backend reported %d" % reported
+    elif derived is not None:
+        capacity, reason = derived, ("backend could not report a capacity (%r); using %d derived "
+                                     "from the acquired MTU %d" % (reported, derived, mtu))
+    else:
+        capacity, reason = SAFE_MIN_FW_WRITE, ("backend could not report a capacity (%r) and no MTU "
+                                               "was acquired; FALLING BACK to the safe %d-byte "
+                                               "minimum" % (reported, SAFE_MIN_FW_WRITE))
+    # Unreachable by construction; an assertion rather than a policy.
+    if type(capacity) is not int or not 1 <= capacity <= 512:
+        raise OtaBleError("write capacity resolution produced %r (from %r)" % (capacity, reported))
+    return capacity, reason
 
 
 # After a match appears, keep listening this long before committing, purely so two
@@ -247,6 +336,89 @@ async def find_device(name_prefix=None, address=None, service_uuid=None,
     return hits[0] if hits else None
 
 
+class OtaLink:
+    """THE LINK CONTRACT: what push_image() and query_info() require of `link`.
+
+    They duck-type it, and that stays true -- nothing here is enforced by
+    inheritance, and a link need not subclass this. It is written down because
+    the interface was being rediscovered by reading push_image()'s body: fugu
+    implements it twice (`BleakLink` and its ESPHome-proxy transport) and the
+    farm node once (`NodeLink`), all independently, and a member that only the
+    failure path touches -- `disconnected` -- is easy to leave out and hard to
+    notice missing.
+
+    Required:
+
+      set_line_handler(fn)   Install fn(line: str) for every complete status
+                             line, newline stripped. Replaces any previous
+                             handler; the module installs its own for the
+                             duration of a call. A status line can straddle two
+                             notifications, so reassembly belongs in the link.
+      async write_cmd(text)  Send one control line. The link is responsible for
+                             the trailing newline if its transport needs one.
+      async write_fw(data)   Send firmware bytes, write-WITHOUT-response.
+      chunk                  int: the largest `data` write_fw() will take. See
+                             usable_chunk() -- getting this wrong corrupts the
+                             image silently in one direction and costs 25x
+                             throughput in the other.
+      disconnected           asyncio.Event, set when the link drops. push_image()
+                             waits on it alongside every timeout; a link without
+                             one turns every drop into a full timeout and reports
+                             the wrong cause.
+
+    Optional, but expected by anything that composes links:
+
+      mtu                    int. Not read by push_image() -- it uses `chunk` --
+                             but adapt_link() derives `chunk` from it.
+      _on_line               The currently installed handler. query_info()
+                             RESTORES rather than clears the caller's handler,
+                             and reads this to do it. A link without it still
+                             works; the caller's handler is simply not put back,
+                             which is silent until its own lines stop arriving.
+                             Both links in this module expose it.
+    """
+
+    #: What push_image() needs, in the form require_link() checks it.
+    REQUIRED = ("set_line_handler", "write_cmd", "write_fw", "chunk", "disconnected")
+    #: What query_info() needs. Deliberately smaller: it sends one command and reads the reply, and
+    #: demanding a firmware sink it never writes to would reject a perfectly good query-only link.
+    REQUIRED_INFO = ("set_line_handler", "write_cmd")
+
+    def set_line_handler(self, fn):
+        raise NotImplementedError
+
+    async def write_cmd(self, text):
+        raise NotImplementedError
+
+    async def write_fw(self, data):
+        raise NotImplementedError
+
+    @property
+    def chunk(self):
+        raise NotImplementedError
+
+    @property
+    def disconnected(self):
+        raise NotImplementedError
+
+
+def require_link(link, what="this call", members=OtaLink.REQUIRED):
+    """Fail a link that cannot carry a push, before it carries half of one.
+
+    Presence only -- this cannot check that write_fw() actually sends anything.
+    What it does buy is that a missing `disconnected` surfaces as a named error
+    at the start rather than as an AttributeError a hundred seconds into a
+    transfer, on the failure path, where it is easily misread as the device
+    misbehaving.
+    """
+    missing = [m for m in members if not hasattr(link, m)]
+    if missing:
+        raise OtaBleError("%s needs a link with %s (see OtaLink); %r provides none of those"
+                          % (what, ", ".join(missing), type(link).__name__))
+    if "disconnected" in members and not hasattr(link.disconnected, "is_set"):
+        raise OtaBleError("%s needs link.disconnected to be an asyncio.Event (see OtaLink)" % what)
+
+
 class BleOtaLink:
     """A connected receiver: one command channel, one notify, one firmware sink."""
 
@@ -255,11 +427,18 @@ class BleOtaLink:
         self.notify_uuid = notify_uuid
         self.fw_uuid = fw_uuid
         self._chunk_override = int(chunk or 0)
+        # False = not looked up yet; None = unavailable on this backend.
+        self._cb_periph = False
+        # Writes that had to wait for CoreBluetooth's queue. Zero across a whole
+        # push means the host never outran the link and the pacing cost nothing.
+        self.paced_writes = 0
         self._cli = None
         self.mtu = 23
         # True only once we have made BlueZ report the negotiated MTU; gates the
         # staleness fallback in _max_write() so CoreBluetooth is never affected.
         self._mtu_acquired = False
+        # Why _mtu_acquired holds that value, for the capacity line.
+        self._mtu_status = "not attempted"
         self.disconnected = asyncio.Event()
         self._on_line = None
         self._rx = b""
@@ -320,7 +499,7 @@ class BleOtaLink:
 
     async def _acquire_mtu_if_default(self):
         """Acquire the MTU for this link. See module-level acquire_bluez_mtu()."""
-        self._mtu_acquired = await acquire_bluez_mtu(self._cli)
+        self._mtu_acquired, self._mtu_status = await acquire_bluez_mtu_status(self._cli)
 
     def _max_write(self):
         """The characteristic's maximum write-without-response size, if honest.
@@ -358,7 +537,68 @@ class BleOtaLink:
         # transfer, and one acked write per command is free.
         await self._cli.write_gatt_char(self.cmd_uuid, line, response=True)
 
+    def _cb_peripheral(self):
+        """CoreBluetooth's CBPeripheral for this link, or None off macOS.
+
+        Reached through bleak internals on purpose: there is no public API for
+        the flow-control question below, and the alternative to asking it is
+        losing firmware bytes silently. Every step is guarded, so a bleak whose
+        internals moved degrades to "no flow control" rather than to an
+        exception - the same behaviour as every non-CoreBluetooth backend.
+        """
+        if self._cb_periph is not False:
+            return self._cb_periph
+        self._cb_periph = None
+        try:
+            self._cb_periph = self._cli._backend._delegate.peripheral
+        except Exception:
+            pass
+        return self._cb_periph
+
+    async def _await_writable(self, budget_s=2.0):
+        """Block until CoreBluetooth will actually carry the next write.
+
+        WHY THIS EXISTS. A write-without-response is unacknowledged, and bleak's
+        CoreBluetooth backend hands it straight to
+        `writeValue_forCharacteristic_type_` with NO flow control at all - it
+        never consults `canSendWriteWithoutResponse` and never waits for
+        `peripheralIsReadyToSendWriteWithoutResponse:` (backends/corebluetooth/
+        PeripheralDelegate.py: the `else` branch is one unawaited call). Apple's
+        contract is that writes issued while that property is false MAY BE
+        DROPPED, and nothing upstream can see it happen: the coroutine returns,
+        the transfer looks healthy, and the device is simply short.
+
+        The credit window used to hide this. At 8 KB the host wrote ~16 packets
+        and then blocked on credit, which gave the queue time to drain; the
+        drops only appear once the window is large enough to let the host run.
+        See usable_chunk() for the BlueZ form of the same failure - there the
+        mitigation was a smaller chunk, here it is asking before writing.
+
+        A budget rather than an unbounded wait: if the property never comes back
+        true the link is dead or the API moved, and the credit/stall machinery
+        upstream is the right place to decide that, not a spin here.
+        """
+        p = self._cb_peripheral()
+        if p is None:
+            return
+        try:
+            if p.canSendWriteWithoutResponse():
+                return
+        except Exception:
+            self._cb_periph = None      # API moved; stop asking
+            return
+        self.paced_writes += 1          # how often the queue was actually full
+        deadline = time.monotonic() + budget_s
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.001)
+            try:
+                if p.canSendWriteWithoutResponse():
+                    return
+            except Exception:
+                return
+
     async def write_fw(self, data):
+        await self._await_writable()
         await self._cli.write_gatt_char(self.fw_uuid, data, response=False)
 
     async def release(self):
@@ -466,6 +706,89 @@ TAMP_WINDOW_BITS = 12
 # interchangeable: magic, the base image's SHA-256, reserved padding to 64 bytes.
 DELTA_MAGIC = 0xFCCDDE10
 DELTA_HEADER_SIZE = 64
+
+
+# Magic of ESP-IDF's esp_app_desc_t (esp_app_format.h). The struct sits immediately after the
+# 24-byte image header plus the 8-byte first segment header, so it is always inside the first
+# 512 bytes of a .bin -- but it is FOUND rather than assumed at a fixed offset, because that layout
+# is a property of the bootloader's image format and not of this protocol.
+APP_DESC_MAGIC = 0xABCD5432
+
+
+def read_local_app_desc(image):
+    """The version string out of a local firmware image's esp_app_desc_t, or None.
+
+    `image` is a path or the image bytes. None means "could not read it" for
+    every reason -- missing file, not an ESP app image, no descriptor -- and
+    callers use it only to print what they are about to push next to what the
+    device says it is running. Do not build a decision on it: it is a label the
+    build wrote about itself, not a hash of anything.
+
+    Lifted 2026-09-10 from two byte-identical copies (fugu etc/ota_ble.py,
+    node tools/ota_ble_push.py) that had already diverged in spelling.
+    """
+    if isinstance(image, (bytes, bytearray)):
+        head = bytes(image[:0x200])
+    else:
+        try:
+            with open(image, "rb") as f:
+                head = f.read(0x200)
+        except OSError:
+            return None
+    off = head.find(struct.pack("<I", APP_DESC_MAGIC))
+    if off < 0:
+        return None
+    return head[off + 0x10:off + 0x30].split(b"\x00", 1)[0].decode("utf-8", "replace")
+
+
+# The receiver's own status lines, which are present in any image that still contains this module.
+# They are the default marker set because they are what a BLE push actually needs to exist on the
+# far side; a consumer whose transport needs more (a console, a BLE stack) passes its own.
+OTAB_RECEIVER_MARKERS = (b"OTAB CRED", b"OTAB READY")
+
+
+def image_keeps_the_push_path(data, markers=OTAB_RECEIVER_MARKERS, *, mode="all"):
+    """Would flashing this image over BLE destroy the path being used to flash it?
+
+    THE BRICK GUARD, generalised from `image_has_ota()` (node) and
+    `image_has_ble()` (fugu). Both asked the same question -- does the image I
+    am about to push still contain the transport I would need to push the NEXT
+    one? -- and differed only in the marker strings and the quantifier, so both
+    are parameters here rather than one project's answer hard-coded.
+
+    `mode` is "all" (every marker must be present; the strict default) or "any"
+    (one is enough, for a marker set where the markers are alternatives rather
+    than requirements). It is validated rather than defaulted: an unrecognised
+    mode raises, because the failure this guard prevents is a device buried in a
+    compost pile that can only be recovered with a cable.
+
+    An empty marker set raises for the same reason -- `all(...)` over nothing is
+    True, which would turn a mis-wired caller into a silent pass.
+    """
+    if mode not in ("all", "any"):
+        raise ValueError("mode must be 'all' or 'any', not %r" % (mode,))
+    markers = tuple(markers)
+    if not markers:
+        raise ValueError("image_keeps_the_push_path needs at least one marker")
+    quantifier = all if mode == "all" else any
+    return quantifier(sig in data for sig in markers)
+
+
+def progress_bar(done, total, label, width=30):
+    """One-line terminal progress bar, ending in a newline when it completes.
+
+    Here because both host tools had grown their own byte-for-byte copy. It
+    writes to stdout unconditionally; a caller that does not want that should
+    pass its own `on_progress` to push_image() instead of using this.
+    """
+    frac = done / total if total else 0
+    filled = int(frac * width)
+    sys.stdout.write("\r  %s [%s%s] %5.1f%% %d/%d"
+                     % (label, "#" * filled, "-" * (width - filled), frac * 100, done, total))
+    sys.stdout.flush()
+    if done >= total:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
 
 
 def image_id(data):
@@ -716,9 +1039,18 @@ def choose_payload(data, info, *, prefer="auto", base_dirs=(), on_note=None):
 async def query_info(link, *, cmd_prefix="", timeout=15.0):
     """Ask the device what it is running and what payloads it accepts.
 
-    Returns {"run", "slot", "base", "xforms"}, or None on an old receiver that
-    does not know the command -- which is not an error, it just means raw.
+    Returns {"run", "slot", "base", "xforms", "resume_capable", "resume"}, or
+    None on an old receiver that does not know the command -- which is not an
+    error, it just means raw.
+
+    `resume_capable` is False when the receiver emitted no RESUME line at all,
+    which is how a receiver that predates resume identifies itself. `resume` is
+    then always None; on a receiver that does know the command it is None when
+    there is nothing to continue, and {"off", "size"} when there is. Feed it to
+    resume_offset() rather than reading it directly -- the decision needs the
+    payload as well.
     """
+    require_link(link, "query_info", OtaLink.REQUIRED_INFO)
     got = {}
     seen = asyncio.Event()
 
@@ -731,6 +1063,11 @@ async def query_info(link, *, cmd_prefix="", timeout=15.0):
         m = _RE_BASE.search(line)
         if m:
             got["base"] = None if m.group(1) == "none" else m.group(1).lower()
+        m = _RE_RESUME.search(line)
+        if m:
+            got["resume_capable"] = True
+            got["resume"] = (None if m.group(1) is None
+                             else {"off": int(m.group(1)), "size": int(m.group(2))})
         m = _RE_XFORM.search(line)
         if m:
             got["xforms"] = tuple(m.group(1).split(","))
@@ -754,12 +1091,119 @@ async def query_info(link, *, cmd_prefix="", timeout=15.0):
         link.set_line_handler(prev)
     # XFORM is emitted last, so its absence means the reply never completed.
     if "xforms" in got:
+        # Absence of a RESUME line is a FACT about the receiver, not a missing key. Defaulting it
+        # here rather than at every read site means a caller cannot accidentally treat "too old to
+        # resume" as "resume is available and empty".
+        got.setdefault("resume_capable", False)
+        got.setdefault("resume", None)
         return got
     return {"refused": True} if got.get("refused") else None
 
 
+def image_is_running(info, image):
+    """Is the device from that `info` reply running exactly `image`? True / False / None.
+
+    push_image() returning True is not proof the new image runs -- its own
+    docstring says so at length and then tells every caller to confirm out of
+    band, at which point fugu wrote one confirmation and the farm node wrote
+    another. This is the part of that job which belongs here: the CRITERION.
+
+    `OTAB BASE` is the running partition's own appended SHA-256, and image_id()
+    computes the same number from a local .bin without either side sending the
+    image. Equal means the device is running THIS build -- an identity, not an
+    inference. Compare that with the weaker checks the same code paths reach
+    for: "it advertised again" only shows something rebooted, "the slot number
+    changed" only shows something different booted, and an uptime comparison
+    shows nothing at all, because a REJECTED image reboots immediately and the
+    previous one comes up with uptime zero.
+
+    None is a third answer and not a soft False: no `info` reply, a device that
+    cannot hash its running partition (`OTAB BASE none`), or an image with no
+    appended hash to compare against. A caller must not report success on it.
+
+    What is deliberately NOT here: the waiting. fugu re-scans for an
+    advertisement, and the node waits for a LoRaWAN invitation, reopens a
+    session with a nonce and asks over the link the push just used. Those share
+    no code and no timing model, and flattening either into the other would cost
+    exactly the guarantee it was written for.
+    """
+    if not info:
+        return None
+    base = info.get("base")
+    if not base:
+        return None
+    want = image_id(image)
+    if want is None:
+        return None
+    return base.lower() == want.lower()
+
+
+def resume_offset(info, payload, xform="raw", *, enabled=True, on_note=None):
+    """Decide whether this push may continue an interrupted one, and from where.
+
+    Returns a wire offset to hand to push_image(resume_from=...), or 0 to start
+    fresh. Either way it says why through `on_note`, because "it resumed" and
+    "it started over" are both surprising if you expected the other one.
+
+    Every condition below must hold, and anything this function cannot
+    establish is answered "no". A resume is an optimisation; a wrong one costs
+    a whole transfer to discover, and the only thing standing between it and a
+    spliced image is a digest check at the far end of that transfer.
+
+      * the receiver said it can resume (it emitted an OTAB RESUME line at all),
+      * it has a transfer to continue (not "none"),
+      * the payload is raw -- under tamp or delta a wire offset is not an image
+        offset, and the device's transform state died with the session,
+      * the size it recorded is exactly this payload's size. That is what stops
+        a resume onto a prefix of a DIFFERENT build: the receiver additionally
+        requires the digest to match, and re-hashes the flashed prefix before
+        `end`, but the cheapest place to notice is here.
+
+    Note that the offset is the RECEIVER'S number, echoed back untouched. The
+    host does not get to choose where to restart -- it has no way to know what
+    reached flash, and the receiver refuses any offset but its own.
+
+    Callers that expose a `--no-resume` flag pass `enabled=False`; a forced
+    fresh push is the first thing to try when a resume behaves oddly.
+    """
+    def note(msg):
+        if on_note:
+            on_note(msg)
+
+    if not enabled:
+        note("resume: disabled, starting from 0")
+        return 0
+    if xform and xform != "raw":
+        note("resume: not defined for a %s payload, starting from 0" % xform)
+        return 0
+    if not info:
+        note("resume: the device did not answer `info`, starting from 0")
+        return 0
+    if not info.get("resume_capable"):
+        note("resume: this receiver predates resume, starting from 0")
+        return 0
+    r = info.get("resume")
+    if not r:
+        note("resume: the device holds no interrupted transfer")
+        return 0
+    off, size = r.get("off"), r.get("size")
+    if not isinstance(off, int) or not isinstance(size, int):
+        note("resume: the device's resume point did not parse, starting from 0")
+        return 0
+    if size != len(payload):
+        note("resume: the device holds %d bytes of a %d-byte transfer, this payload is %d "
+             "-- a different image, starting from 0" % (off, size, len(payload)))
+        return 0
+    if not 0 < off < size:
+        note("resume: offset %d is not inside a %d-byte payload, starting from 0" % (off, size))
+        return 0
+    note("resume: continuing at %d of %d bytes (%.0f %% already in the slot)"
+         % (off, size, 100.0 * off / size))
+    return off
+
+
 async def push_image(link, data, *, sha=None, cmd_prefix="", on_line=None,
-                     on_progress=None, xform=None, out_size=None,
+                     on_progress=None, xform=None, out_size=None, resume_from=0,
                      ready_timeout=60.0, credit_timeout=20.0,
                      credit_retries=3, flush_timeout=60.0, pace_s=0.0):
     """Run `begin`/stream/`end` against an already-open link.
@@ -778,7 +1222,15 @@ async def push_image(link, data, *, sha=None, cmd_prefix="", on_line=None,
 
     The device grants credit and the host must never write past it; that is the
     receiver's only flow control and its staging ring is what it protects.
+
+    `resume_from` continues an interrupted transfer at that wire offset instead
+    of beginning at 0. It must be the offset the receiver itself reported --
+    use resume_offset() to get it. A receiver that refuses the resume, for any
+    reason at all including being too old to know the command, is not an error:
+    this falls back to a fresh `begin` and the whole image goes over. That
+    fallback is why resume never has to be negotiated perfectly.
     """
+    require_link(link, "push_image")
     sha = sha or hashlib.sha256(data).hexdigest()
     total = len(data)
     state = {"granted": 0, "ok": False, "fail": None, "full": False}
@@ -813,32 +1265,63 @@ async def push_image(link, data, *, sha=None, cmd_prefix="", on_line=None,
 
     link.set_line_handler(handle)
 
-    if xform and xform != "raw":
-        if not out_size:
-            raise OtaBleError("xform %r needs out_size (the reconstructed image size)" % xform)
-        await link.write_cmd("%sbegin %d %s %s %d" % (cmd_prefix, total, sha, xform, out_size))
-    else:
-        # Byte-for-byte the original two-argument command, so a receiver that
-        # predates transforms sees nothing new.
-        await link.write_cmd("%sbegin %d %s" % (cmd_prefix, total, sha))
-    # The wait is for a partition erase, not for a round trip.
-    waits = [asyncio.create_task(ready.wait()),
-             asyncio.create_task(done.wait()),
-             asyncio.create_task(link.disconnected.wait())]
-    await asyncio.wait(waits, timeout=ready_timeout,
-                       return_when=asyncio.FIRST_COMPLETED)
-    for t in waits:
-        t.cancel()
-    if state["fail"]:
-        raise OtaBleError("device refused begin: %s" % state["fail"])
-    if not ready.is_set():
-        raise OtaBleError("no OTAB READY within %.0f s" % ready_timeout)
+    async def arm(cmd):
+        """Send one arming command and wait for READY. True if the device armed."""
+        await link.write_cmd(cmd)
+        # The wait is for a partition erase, not for a round trip.
+        waits = [asyncio.create_task(ready.wait()),
+                 asyncio.create_task(done.wait()),
+                 asyncio.create_task(link.disconnected.wait())]
+        await asyncio.wait(waits, timeout=ready_timeout,
+                           return_when=asyncio.FIRST_COMPLETED)
+        for t in waits:
+            t.cancel()
+        return ready.is_set()
+
+    if resume_from:
+        if xform and xform != "raw":
+            raise OtaBleError("resume is only defined for a raw payload, not %r" % xform)
+        if not 0 < resume_from < total:
+            raise OtaBleError("resume offset %d is not inside a %d-byte payload"
+                              % (resume_from, total))
+        if not await arm("%sresume %d %d %s" % (cmd_prefix, resume_from, total, sha)):
+            # Every refusal ends in the same place: a fresh push. `OTAB FAIL
+            # bad-command` is an old receiver, `resume-none` / `resume-mismatch`
+            # a new one that will not stand behind the prefix in its slot, and a
+            # silence is a lost reply -- none of them is a reason to fail a push
+            # that can simply send the whole image. The line is kept in the log
+            # because "it silently did not resume" is the confusing outcome.
+            if on_line:
+                on_line("resume refused (%s); starting from 0"
+                        % (state["fail"] or "no OTAB READY"))
+            state["fail"] = None
+            state["granted"] = 0
+            done.clear()
+            credit.clear()
+            resume_from = 0
+
+    if not resume_from:
+        if xform and xform != "raw":
+            if not out_size:
+                raise OtaBleError("xform %r needs out_size (the reconstructed image size)" % xform)
+            armed = await arm("%sbegin %d %s %s %d" % (cmd_prefix, total, sha, xform, out_size))
+        else:
+            # Byte-for-byte the original two-argument command, so a receiver that
+            # predates transforms sees nothing new.
+            armed = await arm("%sbegin %d %s" % (cmd_prefix, total, sha))
+        if state["fail"]:
+            raise OtaBleError("device refused begin: %s" % state["fail"])
+        if not armed:
+            raise OtaBleError("no OTAB READY within %.0f s" % ready_timeout)
 
     prepare = getattr(link, "prepare_transfer", None)
     if prepare is not None:
         await prepare()
     chunk = link.chunk
-    sent = 0
+    # The already-flashed prefix is not re-sent, and is not re-hashed here either: the receiver
+    # reads it back out of the slot to rebuild the digest, so `end` still checks a SHA-256 over the
+    # whole payload -- see doc/resume.md.
+    sent = resume_from
     while sent < total:
         if sent >= state["granted"]:
             stalled = 0

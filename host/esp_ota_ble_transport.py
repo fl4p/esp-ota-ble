@@ -188,6 +188,14 @@ class DirectLink(O.BleOtaLink):
                     await asyncio.sleep(settle_s)
         raise O.OtaBleError("BLE connection failed: %s" % last)
 
+    def _is_bluez(self):
+        """True when firmware writes go through BlueZ, which is where the cap applies.
+
+        Bumble has its own branch below; the native sender is CoreBluetooth.
+        Only bleak-on-Linux reaches BlueZ.
+        """
+        return self.options.backend == "bleak" and sys.platform.startswith("linux")
+
     async def _configure_capacity(self):
         char = self._cli.services.get_characteristic(self.fw_uuid)
         if char is None or "write-without-response" not in char.properties:
@@ -200,11 +208,16 @@ class DirectLink(O.BleOtaLink):
                 raise O.OtaBleError("Bumble ATT MTU is unverified")
             self._capacity = min(512, mtu - 3)
         else:
-            capacity = getattr(char, "max_write_without_response_size", 0)
-            if self._mtu_acquired and capacity == 20 and self.mtu > 23:
-                capacity = min(400, self.mtu - 3)
-            if type(capacity) is not int or not 1 <= capacity <= 512:
-                raise O.OtaBleError("firmware characteristic write capacity is unverified")
+            # getattr's default also absorbs an AttributeError raised INSIDE the
+            # backend's property, which is why `reported` may be anything at all.
+            reported = getattr(char, "max_write_without_response_size", None)
+            capacity, reason = O.resolve_write_capacity(
+                reported, self.mtu, mtu_acquired=self._mtu_acquired,
+                backend_is_bluez=self._is_bluez())
+            # ONE line, always, naming which of the four things happened: the MTU
+            # acquisition outcome, and how the capacity was arrived at.
+            self.note("BLE write capacity: %s (MTU acquisition: %s) -> %d bytes"
+                      % (reason, self._mtu_status, capacity))
             self._capacity = capacity
         if self.options.chunk > self._capacity:
             raise O.OtaBleError("requested chunk exceeds characteristic capacity")

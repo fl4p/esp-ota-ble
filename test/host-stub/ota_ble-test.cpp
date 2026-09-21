@@ -52,6 +52,13 @@ static bool sawLine(const char *needle) {
     return false;
 }
 
+/// The LAST match, for a line a case provokes more than once (`info` before and after something).
+static const Status *findLastLine(const char *needle) {
+    for (size_t i = g_status.size(); i-- > 0;)
+        if (g_status[i].line.find(needle) != std::string::npos) return &g_status[i];
+    return nullptr;
+}
+
 static const Status *findLine(const char *needle) {
     for (auto &s : g_status)
         if (s.line.find(needle) != std::string::npos) return &s;
@@ -134,6 +141,34 @@ static void pushAll(const std::vector<uint8_t> &img, size_t chunk = 512, int dra
         }
     }
     otaBleTick(0);
+}
+
+/// Stage a half-open byte range of the image, ticking as it goes. Used to interrupt a transfer at
+/// a chosen point and, later, to deliver only the tail a resume is supposed to still need.
+static void pushRange(const std::vector<uint8_t> &img, size_t from, size_t to, size_t chunk = 512) {
+    size_t sent = from;
+    while (sent < to) {
+        const size_t n = to - sent < chunk ? to - sent : chunk;
+        otaBleStageBytes(img.data() + sent, n);
+        sent += n;
+        otaBleTick(0);
+    }
+    otaBleTick(0);
+}
+
+/// What the receiver last advertised as resumable. False when it said "none" or said nothing.
+static bool resumePoint(uint32_t *off, uint32_t *size) {
+    const Status *s = findLastLine("OTAB RESUME ");
+    if (!s) return false;
+    unsigned a = 0, b = 0;
+    if (sscanf(s->line.c_str(), "OTAB RESUME %u %u", &a, &b) != 2) return false;
+    *off = a;
+    *size = b;
+    return true;
+}
+
+static std::string resumeCmd(uint32_t off, const std::vector<uint8_t> &img) {
+    return "resume " + std::to_string(off) + " " + std::to_string(img.size()) + " " + sha256hex(img);
 }
 
 /// "begin" for a transformed payload: wire size/digest describe `wire`, `outSize` the image it
@@ -1110,6 +1145,278 @@ static void test_begin_rejects_trailing_garbage() {
     end_case();
 }
 
+// ---------------------------------------------------------------- resume
+//
+// These run under every erase strategy on purpose. A resumed session always drives the slot through
+// esp_ota_write_with_offset and the per-sector commit, whatever the build's default strategy is,
+// because that is the only writer here that can start anywhere but offset zero -- so the resume
+// path in an OTA_BLE_SECTOR_SKIP=0 build is DIFFERENT code from the one it took on the way in, and
+// compiling it only under the default would leave that combination unbuilt as well as untested.
+//
+// Every case asserts on the SLOT and on the boot partition, never on a return code: a resume that
+// installs a splice of two builds returns exactly the same booleans as one that works.
+
+/// A different build of the same length: makeImage() is a pure function of the index, so two
+/// makeImage() results of equal length are byte-equal and could not tell a digest check apart.
+static std::vector<uint8_t> withDirtySectors(const std::vector<uint8_t> &img, size_t dirty) {
+    std::vector<uint8_t> v = img;
+    for (size_t k = 0; k < dirty; ++k) {
+        const size_t off = (k * 3 + 1) * 4096;
+        for (size_t i = off; i < off + 4096 && i < v.size(); ++i) v[i] = (uint8_t) (v[i] ^ 0x5A);
+    }
+    return v;
+}
+
+/// Run a transfer that dies partway, the way a dropped BLE link does: the consumer's disconnect
+/// callback calls otaBleRequestAbort(). Returns the resume point the device then advertises.
+static bool interruptAt(const std::vector<uint8_t> &img, size_t at, uint32_t *off, uint32_t *size) {
+    CHECK(otaBleSubmitCommand(beginCmd(img).c_str()) == OtaBleSubmit::Accepted, "begin rejected");
+    otaBleTick(0);
+    pushRange(img, 0, at);
+    otaBleRequestAbort();
+    otaBleTick(0);
+    CHECK(!otaBleActive(), "still active after the link dropped");
+    CHECK(otaBleSubmitCommand("info") == OtaBleSubmit::Accepted, "info rejected");
+    otaBleTick(0);
+    return resumePoint(off, size);
+}
+
+static void test_resume_finishes_the_image() {
+    // The measured failure: a raw push dies at ~23 %. Here it dies at 9 of 20 sectors, and what
+    // matters is that the slot ends up holding the WHOLE image without those 9 sectors crossing the
+    // link twice.
+    begin_case("resume: an interrupted transfer finishes");
+    auto img = makeImage(20 * 4096 + 137);
+    uint32_t off = 0, size = 0;
+    CHECK(interruptAt(img, 9 * 4096 + 900, &off, &size), "no resume point offered");
+    CHECK(size == img.size(), "resume size %u, image is %zu", size, img.size());
+    CHECK(off > 0 && off % 4096 == 0, "resume offset %u is not a sector boundary", off);
+    CHECK(off <= 9 * 4096, "resume offset %u claims more than was ever staged", off);
+    CHECK(g_fake.bootPart == nullptr, "boot partition moved on an interrupted transfer");
+
+    const size_t stagedBefore = g_fake.flashed.size();
+    CHECK(otaBleSubmitCommand(resumeCmd(off, img).c_str()) == OtaBleSubmit::Accepted,
+          "resume rejected");
+    otaBleTick(0);
+    CHECK(otaBleActive(), "not active after resume");
+    CHECK(sawLine("OTAB READY"), "no READY on resume");
+    CHECK(findLastLine("from=") != nullptr, "READY did not say where it picked up");
+    pushRange(img, off, img.size());
+    CHECK(otaBleSubmitCommand("end") == OtaBleSubmit::Accepted, "end rejected");
+    otaBleTick(0);
+
+    CHECK(!sawLine("OTAB FAIL sha"), "digest rejected a correctly resumed image");
+    CHECK(g_fake.bootPart != nullptr, "boot partition not set after a resumed push");
+    CHECK(g_restarted, "did not restart");
+    CHECK(memcmp(g_fake.slot.data(), img.data(), img.size()) == 0,
+          "the slot does not hold the image after a resume");
+    // The point of the whole exercise: the bytes below the resume offset were not re-sent. Only
+    // sector 0 is rewritten, to put back what esp_ota_begin had to erase.
+    const size_t rewritten = g_fake.flashed.size() - stagedBefore;
+    CHECK(rewritten <= img.size() - off + 4096,
+          "resume rewrote %zu bytes for a %zu-byte tail", rewritten, img.size() - off);
+    end_case();
+}
+
+static void test_resume_rehashes_the_prefix_from_flash() {
+    // THE case this design turns on. The receiver cannot carry a hash state across a dropped link,
+    // so it re-reads the already-flashed prefix and hashes THAT. Corrupt the slot under it: if the
+    // prefix were assumed good, `end` would pass and a spliced image would be marked bootable.
+    begin_case("resume: a corrupted prefix fails the whole-image digest");
+    auto img = makeImage(20 * 4096);
+    uint32_t off = 0, size = 0;
+    CHECK(interruptAt(img, 9 * 4096, &off, &size), "no resume point offered");
+    CHECK(off >= 2 * 4096, "need at least two sectors in the slot to corrupt one");
+
+    g_fake.slot[4096 + 17] ^= 0xFF; // inside the prefix, above sector 0, never re-sent
+
+    CHECK(otaBleSubmitCommand(resumeCmd(off, img).c_str()) == OtaBleSubmit::Accepted,
+          "resume rejected");
+    otaBleTick(0);
+    pushRange(img, off, img.size());
+    CHECK(otaBleSubmitCommand("end") == OtaBleSubmit::Accepted, "end rejected");
+    otaBleTick(0);
+
+    CHECK(sawLine("OTAB FAIL sha-mismatch"), "a corrupted prefix was not caught by the digest");
+    CHECK(g_fake.bootPart == nullptr, "boot partition moved on a spliced image");
+    CHECK(!g_restarted, "restarted into an unverified image");
+    end_case();
+}
+
+static void test_resume_with_a_different_digest_is_refused() {
+    // A host that resumes the wrong build must be told so BEFORE it spends a transfer finding out.
+    begin_case("resume: a mismatched digest is refused");
+    auto img = makeImage(20 * 4096);
+    // Same LENGTH, different bytes -- so only the digest can tell them apart. makeImage() is a
+    // function of the index alone, so a longer image truncated to this length would be byte-equal
+    // and this case would test nothing.
+    auto other = withDirtySectors(img, 5);
+    uint32_t off = 0, size = 0;
+    CHECK(interruptAt(img, 9 * 4096, &off, &size), "no resume point offered");
+
+    CHECK(otaBleSubmitCommand(resumeCmd(off, other).c_str()) == OtaBleSubmit::Rejected,
+          "resume with the wrong digest was accepted");
+    CHECK(sawLine("OTAB FAIL resume-mismatch"), "no resume-mismatch");
+    otaBleTick(0);
+    CHECK(!otaBleActive(), "a refused resume left a session open");
+    CHECK(g_fake.bootPart == nullptr, "boot partition moved on a refused resume");
+
+    // A refusal is not a dead end: the fallback every host takes is a fresh push, and it must work.
+    CHECK(otaBleSubmitCommand(beginCmd(other).c_str()) == OtaBleSubmit::Accepted,
+          "fresh begin after a refused resume was rejected");
+    otaBleTick(0);
+    pushAll(other);
+    CHECK(otaBleSubmitCommand("end") == OtaBleSubmit::Accepted, "end rejected");
+    otaBleTick(0);
+    CHECK(g_fake.bootPart != nullptr, "the fallback push did not install");
+    CHECK(memcmp(g_fake.slot.data(), other.data(), other.size()) == 0,
+          "the slot does not hold the image the fallback pushed");
+    end_case();
+}
+
+static void test_resume_at_the_wrong_offset_is_refused() {
+    // The offset is the RECEIVER'S number echoed back. A host that invents one -- an old tool, a
+    // different chunking, a misread log -- must not be able to place bytes at an offset nothing
+    // ever wrote below.
+    begin_case("resume: an offset the receiver did not name is refused");
+    auto img = makeImage(20 * 4096);
+    uint32_t off = 0, size = 0;
+    CHECK(interruptAt(img, 9 * 4096, &off, &size), "no resume point offered");
+
+    CHECK(otaBleSubmitCommand(resumeCmd(off + 4096, img).c_str()) == OtaBleSubmit::Rejected,
+          "a too-high resume offset was accepted");
+    CHECK(otaBleSubmitCommand(resumeCmd(off - 4096, img).c_str()) == OtaBleSubmit::Rejected,
+          "a too-low resume offset was accepted");
+    CHECK(otaBleSubmitCommand(("resume 0 " + std::to_string(img.size()) + " " + sha256hex(img)).c_str())
+                  == OtaBleSubmit::Rejected, "a zero resume offset was accepted");
+    CHECK(otaBleSubmitCommand(resumeCmd(off, img).c_str()) == OtaBleSubmit::Accepted,
+          "the receiver's own offset was refused");
+    otaBleTick(0);
+    otaBleRequestAbort();
+    otaBleTick(0);
+    end_case();
+}
+
+static void test_resume_is_not_offered_without_a_partial() {
+    // "none" rather than silence: a host has to be able to tell "I can resume, there is nothing to
+    // resume" from "I have never heard of resume", because only the first says the NEXT drop is
+    // recoverable.
+    begin_case("resume: nothing to continue reports none");
+    CHECK(otaBleSubmitCommand("info") == OtaBleSubmit::Accepted, "info rejected");
+    otaBleTick(0);
+    CHECK(sawLine("OTAB RESUME none"), "a fresh receiver did not report RESUME none");
+    uint32_t off = 0, size = 0;
+    CHECK(!resumePoint(&off, &size), "a fresh receiver offered a resume point");
+    // And the command itself is refused, which is what an old host that guesses would hit.
+    CHECK(otaBleSubmitCommand("resume 4096 20000 "
+                              "0000000000000000000000000000000000000000000000000000000000000000")
+                  == OtaBleSubmit::Rejected, "resume accepted with no transfer to continue");
+    CHECK(sawLine("OTAB FAIL resume-none"), "no resume-none");
+
+    // A COMPLETED push leaves nothing either: the slot holds a whole image, not a prefix.
+    auto img = makeImage(8 * 4096);
+    CHECK(otaBleSubmitCommand(beginCmd(img).c_str()) == OtaBleSubmit::Accepted, "begin rejected");
+    otaBleTick(0);
+    pushAll(img);
+    CHECK(otaBleSubmitCommand("end") == OtaBleSubmit::Accepted, "end rejected");
+    otaBleTick(0);
+    g_status.clear();
+    CHECK(otaBleSubmitCommand("info") == OtaBleSubmit::Accepted, "info rejected");
+    otaBleTick(0);
+    CHECK(sawLine("OTAB RESUME none"), "a completed push left a resume point behind");
+    end_case();
+}
+
+static void test_resume_is_not_offered_after_a_transform() {
+    // Under delta (and tamp) a wire offset is not an image offset, and the transform's own state --
+    // patch decoder, compression window -- died with the session. There is nothing a byte offset
+    // could mean, so the receiver must not offer one.
+    begin_case("resume: a transformed transfer offers nothing");
+    auto img = makeImage(20 * 4096);
+    auto wire = deltaWire(g_fake.baseSha, img);
+    g_fake.base.assign(img.size(), 0x11);
+    CHECK(otaBleSubmitCommand(beginCmdX(wire, "delta", img.size()).c_str()) == OtaBleSubmit::Accepted,
+          "delta begin rejected");
+    otaBleTick(0);
+    pushRange(wire, 0, 9 * 4096);
+    otaBleRequestAbort();
+    otaBleTick(0);
+    CHECK(otaBleSubmitCommand("info") == OtaBleSubmit::Accepted, "info rejected");
+    otaBleTick(0);
+    CHECK(sawLine("OTAB RESUME none"), "an interrupted delta offered a resume point");
+    end_case();
+}
+
+static void test_resume_record_does_not_outlive_the_slot() {
+    // A record is a promise about what is in the slot. A fresh `begin` erases into that slot, so
+    // the promise has to be withdrawn before it does -- even if that begin then goes nowhere.
+    begin_case("resume: a fresh begin drops the recorded point");
+    auto img = makeImage(20 * 4096);
+    uint32_t off = 0, size = 0;
+    CHECK(interruptAt(img, 9 * 4096, &off, &size), "no resume point offered");
+
+    auto other = makeImage(12 * 4096);
+    CHECK(otaBleSubmitCommand(beginCmd(other).c_str()) == OtaBleSubmit::Accepted, "begin rejected");
+    otaBleTick(0);
+    otaBleRequestAbort(); // dies immediately, before anything is flushed
+    otaBleTick(0);
+
+    g_status.clear();
+    CHECK(otaBleSubmitCommand("info") == OtaBleSubmit::Accepted, "info rejected");
+    otaBleTick(0);
+    CHECK(sawLine("OTAB RESUME none"), "the old resume point survived a fresh begin");
+    CHECK(otaBleSubmitCommand(resumeCmd(off, img).c_str()) == OtaBleSubmit::Rejected,
+          "resumed onto a slot a later begin had erased");
+    end_case();
+}
+
+static void test_resume_record_dropped_by_a_begin_that_fails_after_erasing() {
+    // The narrow one. esp_ota_begin erases BEFORE the later checks in beginWithDigest run, so a
+    // begin that fails after it -- here a delta whose base cannot be hashed -- destroys slot
+    // content and then returns without ever reaching an abort. Nothing downstream would clear the
+    // record on that path, which is why beginWithDigest drops it on the way in rather than on the
+    // way out.
+    begin_case("resume: a begin that erases and then fails drops the record");
+    auto img = makeImage(20 * 4096);
+    uint32_t off = 0, size = 0;
+    CHECK(interruptAt(img, 9 * 4096, &off, &size), "no resume point offered");
+
+    g_fake.base.assign(img.size(), 0x11);
+    g_fake.failBaseSha = true;
+    auto wire = deltaWire(g_fake.baseSha, img);
+    CHECK(otaBleSubmitCommand(beginCmdX(wire, "delta", img.size()).c_str()) == OtaBleSubmit::Accepted,
+          "delta begin rejected");
+    otaBleTick(0);
+    CHECK(sawLine("OTAB FAIL no-base"), "the delta begin did not fail where this case needs it to");
+    CHECK(!otaBleActive(), "a failed begin left a session open");
+
+    g_status.clear();
+    CHECK(otaBleSubmitCommand("info") == OtaBleSubmit::Accepted, "info rejected");
+    otaBleTick(0);
+    CHECK(sawLine("OTAB RESUME none"),
+          "a resume point survived a begin that had already erased the slot");
+    CHECK(otaBleSubmitCommand(resumeCmd(off, img).c_str()) == OtaBleSubmit::Rejected,
+          "resumed onto a slot a failed begin had erased");
+    end_case();
+}
+
+static void test_resume_malformed_commands() {
+    begin_case("resume: malformed forms are rejected");
+    auto img = makeImage(20 * 4096);
+    uint32_t off = 0, size = 0;
+    CHECK(interruptAt(img, 9 * 4096, &off, &size), "no resume point offered");
+    const std::string sha = sha256hex(img);
+    CHECK(otaBleSubmitCommand("resume") == OtaBleSubmit::Rejected, "bare resume accepted");
+    CHECK(otaBleSubmitCommand("resume 4096") == OtaBleSubmit::Rejected, "one-field resume accepted");
+    CHECK(otaBleSubmitCommand(("resume 4096 20000 " + sha + " EXTRA").c_str()) == OtaBleSubmit::Rejected,
+          "trailing garbage accepted");
+    CHECK(otaBleSubmitCommand(("resume 4096 20000 " + sha.substr(0, 63)).c_str()) == OtaBleSubmit::Rejected,
+          "short digest accepted");
+    CHECK(otaBleSubmitCommand("resumes 1 2 3") == OtaBleSubmit::Rejected, "resumes accepted");
+    CHECK(!otaBleActive(), "a malformed resume armed a session");
+    end_case();
+}
+
 int main() {
     printf("ota_ble host tests\n");
     test_happy_path();
@@ -1167,6 +1474,15 @@ int main() {
     test_delta_bad_magic_is_refused();
     test_delta_header_only_is_refused();
     test_delta_truncated_header_is_refused();
+    test_resume_finishes_the_image();
+    test_resume_rehashes_the_prefix_from_flash();
+    test_resume_with_a_different_digest_is_refused();
+    test_resume_at_the_wrong_offset_is_refused();
+    test_resume_is_not_offered_without_a_partial();
+    test_resume_is_not_offered_after_a_transform();
+    test_resume_record_does_not_outlive_the_slot();
+    test_resume_record_dropped_by_a_begin_that_fails_after_erasing();
+    test_resume_malformed_commands();
 
     if (g_failures) {
         printf("\n%d check(s) FAILED\n", g_failures);
