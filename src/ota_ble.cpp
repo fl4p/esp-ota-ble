@@ -13,7 +13,12 @@
 #include <esp_timer.h>
 #include <esp_partition.h>
 #include <esp_system.h>
+#include <mbedtls/build_info.h>
+#if MBEDTLS_VERSION_MAJOR >= 4
+#include <psa/crypto.h>
+#else
 #include <mbedtls/sha256.h>
+#endif
 
 // Staging ring: otaBleStageBytes (producer/BLE host task) only copies bytes in here; otaBleTick
 // (consumer) drains to flash. Decoupling keeps the slow esp_ota_write off the host task -- a stall
@@ -168,7 +173,23 @@ static std::mutex ringMutex;
 
 static esp_ota_handle_t otaHandle = 0;
 static const esp_partition_t *otaPart = nullptr;
+#if MBEDTLS_VERSION_MAJOR >= 4
+// mbedtls 4 (IDF 6) removed the legacy hash API
+static psa_hash_operation_t shaCtx = PSA_HASH_OPERATION_INIT;
+static void shaStart() { psa_hash_abort(&shaCtx); psa_hash_setup(&shaCtx, PSA_ALG_SHA_256); }
+static void shaUpdate(const uint8_t *p, size_t n) { psa_hash_update(&shaCtx, p, n); }
+static void shaFinish(uint8_t out[32]) {
+    size_t len = 0;
+    if (psa_hash_finish(&shaCtx, out, 32, &len) != PSA_SUCCESS) memset(out, 0, 32);
+}
+static void shaFree() { psa_hash_abort(&shaCtx); }
+#else
 static mbedtls_sha256_context shaCtx;
+static void shaStart() { mbedtls_sha256_init(&shaCtx); mbedtls_sha256_starts(&shaCtx, 0); }
+static void shaUpdate(const uint8_t *p, size_t n) { mbedtls_sha256_update(&shaCtx, p, n); }
+static void shaFinish(uint8_t out[32]) { mbedtls_sha256_finish(&shaCtx, out); }
+static void shaFree() { mbedtls_sha256_free(&shaCtx); }
+#endif
 static uint8_t expectedSha[32];
 
 // The wire payload is not necessarily the image. `expectedSize`/`written`/`expectedSha` stay in WIRE
@@ -742,8 +763,7 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, ui
         return false;
     }
 
-    mbedtls_sha256_init(&shaCtx);
-    mbedtls_sha256_starts(&shaCtx, 0); // 0 = SHA-256
+    shaStart();
     if (resumeFrom) {
         // THE DIGEST DECISION, and the whole reason a resume is safe.
         //
@@ -762,19 +782,19 @@ static bool beginWithDigest(uint32_t size, const uint8_t sha[32], OtaXform x, ui
         //
         // Raw only, so the wire prefix and the slot prefix are the same bytes. Sector 0 comes from
         // the buffer because esp_ota_begin has already erased it in flash.
-        mbedtls_sha256_update(&shaCtx, secBuf, esz);
+        shaUpdate(secBuf, esz);
         bool readErr = false;
         for (uint32_t o = esz; o < resumeFrom;) {
             const uint32_t n = std::min<uint32_t>(esz, resumeFrom - o);
             if (esp_partition_read(otaPart, o, secBuf, n) != ESP_OK) { readErr = true; break; }
-            mbedtls_sha256_update(&shaCtx, secBuf, n);
+            shaUpdate(secBuf, n);
             o += n;
         }
         if (readErr) {
             // Unreadable slot: there is no prefix to build on, so there is no resume. Not a
             // downgrade to "hash what we can" -- an unevaluable check is never permission.
             emit(OtaBleLevel::Warn, "OTAB FAIL resume-read");
-            mbedtls_sha256_free(&shaCtx);
+            shaFree();
             otaXformEnd();
             esp_ota_abort(otaHandle);
             otaHandle = 0;
@@ -980,7 +1000,7 @@ static bool drainRing() {
             otaBleAbort();
             return false;
         }
-        mbedtls_sha256_update(&shaCtx, slice, n);
+        shaUpdate(slice, n);
         written += n;
         drained = true;
     }
@@ -1084,7 +1104,7 @@ bool otaBleEnd() {
         return false;
     }
     uint8_t got[32];
-    mbedtls_sha256_finish(&shaCtx, got);
+    shaFinish(got);
     if (memcmp(got, expectedSha, 32) != 0) {
         // Checked before the transform is finalised: this says the LINK corrupted the payload, and
         // it is the one diagnosis a failed reconstruction would otherwise mask with its own error.
@@ -1128,7 +1148,7 @@ bool otaBleEnd() {
     if (err != ESP_OK) {
         emit(OtaBleLevel::Warn, "OTAB FAIL esp_ota_end %s", esp_err_to_name(err));
         otaXformEnd();
-        mbedtls_sha256_free(&shaCtx);
+        shaFree();
         { std::lock_guard<std::mutex> lk(ringMutex); active = false; freeRing(); }
         otaHandle = 0;
         quiesce(false);
@@ -1136,7 +1156,7 @@ bool otaBleEnd() {
     }
     err = esp_ota_set_boot_partition(otaPart);
     otaXformEnd();
-    mbedtls_sha256_free(&shaCtx);
+    shaFree();
     { std::lock_guard<std::mutex> lk(ringMutex); active = false; freeRing(); }
     otaHandle = 0;
     if (err != ESP_OK) {
@@ -1176,7 +1196,7 @@ void otaBleAbort() {
     { std::lock_guard<std::mutex> lk(ringMutex); active = false; freeRing(); }
     otaXformEnd();
     if (otaHandle) { esp_ota_abort(otaHandle); otaHandle = 0; }
-    mbedtls_sha256_free(&shaCtx);
+    shaFree();
     quiesce(false);
     abortReq = false;
     creditRepeatArmed = false;
