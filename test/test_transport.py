@@ -46,6 +46,7 @@ class Queue:
 
 class TransportTests(unittest.IsolatedAsyncioTestCase):
     def link(self, **options):
+        options.setdefault('backend', 'bleak')
         link = T.DirectLink('cmd', 'notify', 'fw', options=T.Options(**options), on_note=lambda _: None)
         link._cli = NS(disconnect=AsyncMock(), write_gatt_char=AsyncMock())
         link._capacity = 512
@@ -174,9 +175,56 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_corebluetooth_unwritable_is_failure(self):
         link = self.link()
         link._cli._backend = NS(_delegate=NS(peripheral=NS(canSendWriteWithoutResponse=lambda: False)))
-        with patch.object(T.time, 'monotonic', side_effect=[0, 3]):
+        with patch.object(T.time, 'monotonic', side_effect=[0, T.WRITABLE_BUDGET_S + 1]):
             with self.assertRaises(O.OtaBleError): await link.write_fw(b'x')
         link._cli.write_gatt_char.assert_not_awaited()
+
+    def test_auto_backend_resolution(self):
+        for native, expected in [(True, 'native'), (False, 'bleak')]:
+            with self.subTest(native=native), patch.object(T, 'native_available', lambda: native):
+                self.assertEqual(T.DirectLink('c', 'n', 'f').options.backend, expected)
+                self.assertEqual(T.DirectLink('c', 'n', 'f', options=T.Options(adapter='hci0')).options.backend,
+                                 'bleak')
+        self.assertEqual(T.DirectLink('c', 'n', 'f', options=T.Options('native')).options.backend, 'native')
+        with patch.object(T, 'native_available', lambda: False), patch.object(T.sys, 'platform', 'linux'):
+            self.assertEqual(T.default_pace_ms(T.Options()), 15.0)
+
+    def test_native_probe_needs_swiftc_not_just_xcrun(self):
+        T.native_available.cache_clear()
+        try:
+            with patch.object(T.sys, 'platform', 'darwin'), \
+                    patch.object(T.subprocess, 'run', return_value=NS(returncode=1)):
+                self.assertFalse(T.native_available())
+            T.native_available.cache_clear()
+            with patch.object(T.sys, 'platform', 'darwin'), \
+                    patch.object(T.subprocess, 'run', side_effect=FileNotFoundError):
+                self.assertFalse(T.native_available())
+        finally:
+            T.native_available.cache_clear()
+
+    async def test_attach_resolves_auto_to_bleak(self):
+        char = NS(properties=['write-without-response'], max_write_without_response_size=244)
+        client = NS(is_connected=True, mtu_size=247, services=NS(get_characteristic=lambda _: char),
+                    disconnect=AsyncMock(), start_notify=AsyncMock(), write_gatt_char=AsyncMock())
+        with patch.object(T, 'native_available', lambda: True):
+            link = T.DirectLink('cmd', 'notify', 'fw', on_note=lambda _: None)
+        self.assertEqual(link.options.backend, 'native')
+        with patch.object(link, '_acquire_mtu_if_default', AsyncMock()):
+            await link.attach(client, disconnected=asyncio.Event())
+        self.assertEqual(link.options.backend, 'bleak')
+
+    def test_writable_budget_stays_inside_device_stall_watchdog(self):
+        self.assertLess(T.WRITABLE_BUDGET_S, 30.0)
+
+    async def test_corebluetooth_stall_within_budget_still_writes(self):
+        link = self.link()
+        ready = iter([False, False, True])
+        link._cli._backend = NS(_delegate=NS(peripheral=NS(canSendWriteWithoutResponse=lambda: next(ready))))
+        clock = iter([0, 5])
+        with patch.object(T.time, 'monotonic', side_effect=lambda: next(clock, 6)), \
+                patch.object(T.asyncio, 'sleep', AsyncMock()):
+            await link.write_fw(b'x')
+        link._cli.write_gatt_char.assert_awaited_once_with('fw', b'x', response=False)
 
     async def test_backend_reference_survives_scan_and_releases_on_failure(self):
         keeper = NS(acquire=AsyncMock(), release=AsyncMock())

@@ -1,18 +1,43 @@
 """Direct OTA transports and explicit throughput controls. No global Bleak shadowing."""
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import functools
 import math
+import subprocess
 import sys
 import time
 
 import esp_ota_ble as O
+
+# Below the receiver's STALL_MS (30 s) so the host reports the stall, not the device.
+WRITABLE_BUDGET_S = 20.0
+
+# Mac Bleak polls canSendWriteWithoutResponse, which can stick false on a live link (fugu-fmetal
+# 2026-09-29: 7/7 pushes stalled at 0.5-37 %, native delivered the same image first try).
+
+
+@functools.lru_cache(maxsize=None)
+def native_available():
+    """swiftc is reachable. /usr/bin/xcrun ships with every Mac, so its presence proves nothing."""
+    if sys.platform != "darwin":
+        return False
+    try:
+        return subprocess.run(["xcrun", "--find", "swiftc"], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def auto_backend():
+    """What "auto" means here; attach() and an explicit adapter resolve it to bleak instead."""
+    return "native" if native_available() else "bleak"
 
 TESTED_UB500 = "AC:A7:F1:83:27:AD"
 
 
 @dataclass(frozen=True)
 class Options:
-    backend: str = "bleak"
+    backend: str = "auto"
     adapter: str = None
     chunk: int = 0
     interval_ms: float = None
@@ -20,7 +45,7 @@ class Options:
     experimental_hci_packet_size: int = None
 
     def __post_init__(self):
-        if self.backend not in ("bleak", "bumble", "native"):
+        if self.backend not in ("auto", "bleak", "bumble", "native"):
             raise ValueError("unknown BLE backend")
         if type(self.chunk) is not int or not 0 <= self.chunk <= 512:
             raise ValueError("chunk must be 0 (automatic) or 1..512")
@@ -40,8 +65,9 @@ class Options:
 
 
 def add_arguments(parser, *, chunk=True):
-    parser.add_argument("--ble-backend", choices=("bleak", "bumble", "native"), default="bleak",
-                        help="direct transport: OS Bleak, Linux Bumble, or native Mac sender")
+    parser.add_argument("--ble-backend", choices=("auto", "bleak", "bumble", "native"), default="auto",
+                        help="direct transport: OS Bleak, Linux Bumble, or native Mac sender "
+                             "(auto = native on macOS with swiftc, else bleak)")
     parser.add_argument("--adapter", help="Bluetooth controller (Bumble: prefer its MAC; BlueZ: hciN)")
     if chunk:
         parser.add_argument("--chunk", "--ble-chunk", type=int, default=0,
@@ -54,19 +80,27 @@ def add_arguments(parser, *, chunk=True):
 
 
 def from_arguments(args):
-    return Options(backend=getattr(args, "ble_backend", "bleak"),
+    return Options(backend=getattr(args, "ble_backend", "auto"),
                    adapter=getattr(args, "adapter", None), chunk=getattr(args, "chunk", 0),
                    interval_ms=getattr(args, "ble_interval_ms", None), phy=getattr(args, "ble_phy", None),
                    experimental_hci_packet_size=getattr(args, "experimental_hci_packet_size", None))
 
 
+def resolve_backend(options):
+    if options.backend != "auto":
+        return options
+    return replace(options, backend="bleak" if options.adapter else auto_backend())
+
+
 def default_pace_ms(options):
+    options = resolve_backend(options)
     return 15.0 if options.backend == "bleak" and sys.platform.startswith("linux") else 0.0
 
 
 class DirectLink(O.BleOtaLink):
     def __init__(self, cmd_uuid, notify_uuid, fw_uuid, *, options=None, on_note=print):
-        self.options = options or Options()
+        self._auto = (options or Options()).backend == "auto"
+        self.options = resolve_backend(options or Options())
         super().__init__(cmd_uuid, notify_uuid, fw_uuid, chunk=self.options.chunk)
         self.note = on_note
         self._keeper = None
@@ -85,6 +119,8 @@ class DirectLink(O.BleOtaLink):
         method neither connects nor replaces subscriptions. release() restores
         experimental queue settings but does not disconnect the owner's client.
         """
+        if self._auto and self._cli is None:
+            self.options = replace(self.options, backend="bleak")
         if self._cli is not None or self.options.backend == "native":
             raise O.OtaBleError("attach needs an unused Bleak/Bumble link")
         if not isinstance(disconnected, asyncio.Event) or disconnected.is_set() or not client.is_connected:
@@ -296,12 +332,19 @@ class DirectLink(O.BleOtaLink):
         await self._wait_queue()
         if self.options.backend == "bleak":
             peripheral = getattr(getattr(getattr(self._cli, "_backend", None), "_delegate", None), "peripheral", None)
-            if peripheral is not None:
-                deadline = time.monotonic() + 2
+            if peripheral is not None and not peripheral.canSendWriteWithoutResponse():
+                # A dead link sets `disconnected` within the supervision timeout; a live one can
+                # hold the queue full for seconds, so 2 s was too short a budget.
+                t0 = time.monotonic()
                 while not peripheral.canSendWriteWithoutResponse():
-                    if self.disconnected.is_set() or time.monotonic() >= deadline:
-                        raise O.OtaBleError("CoreBluetooth remained unwritable")
+                    if self.disconnected.is_set():
+                        raise O.OtaBleError("link dropped while CoreBluetooth was unwritable")
+                    if time.monotonic() - t0 >= WRITABLE_BUDGET_S:
+                        raise O.OtaBleError("CoreBluetooth remained unwritable for %.0f s; "
+                                            "retry with --ble-backend native" % WRITABLE_BUDGET_S)
                     await asyncio.sleep(.001)
+                if time.monotonic() - t0 > 1:
+                    self.note("CoreBluetooth unwritable for %.1f s" % (time.monotonic() - t0))
         await self._cli.write_gatt_char(self.fw_uuid, data, response=False)
 
     async def write_cmd(self, text):

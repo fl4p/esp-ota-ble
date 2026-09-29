@@ -17,7 +17,8 @@ new packaging on every consumer firmware.
 
 | Option | Meaning |
 | --- | --- |
-| `--ble-backend bleak` | Default OS transport. Preserves normal adapter selection. |
+| `--ble-backend auto` | Default: `native` on macOS when `xcrun --find swiftc` succeeds (Xcode or its command line tools), else `bleak`; `bleak` when `--adapter` is given. `Options()` defaults to `auto` too, and `attach()` resolves it to `bleak`. |
+| `--ble-backend bleak` | OS transport. Preserves normal adapter selection. On macOS it polls `canSendWriteWithoutResponse`, which was seen stuck false on a live link (7/7 pushes failed, 2026-09-29); the native sender pushed the same image first try. |
 | `--ble-backend bumble` | Linux controller ownership via bumble-bleak; explicit import, no global Bleak shadow. |
 | `--ble-backend native` | Mac CoreBluetooth sender running on a native serial queue; requires Xcode command line tools. |
 | `--adapter` | BlueZ `hciN`, or a bumble-bleak controller MAC/transport such as `usb:2357:0604`. Native Mac rejects adapter selection. |
